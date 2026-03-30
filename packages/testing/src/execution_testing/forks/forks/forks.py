@@ -47,6 +47,12 @@ from ..base_fork import (
     TransactionIntrinsicCostCalculator,
 )
 from ..gas_costs import GasCosts
+from .extensions.amsterdam import (
+    opcode_gas_map as amsterdam_extension_opcode_gas_map,
+)
+from .extensions.amsterdam import (
+    valid_opcodes as amsterdam_extension_valid_opcodes,
+)
 from .helpers import ceiling_division, fake_exponential
 
 CURRENT_FILE = Path(realpath(__file__))
@@ -2890,20 +2896,35 @@ class Amsterdam(BPO2):
         return False
 
     @classmethod
+    def extension_valid_opcodes(cls) -> List[Opcodes]:
+        """
+        Return opcode additions contributed by Amsterdam extension modules.
+        """
+        return amsterdam_extension_valid_opcodes()
+
+    @classmethod
     def valid_opcodes(cls) -> List[Opcodes]:
-        """Add SLOTNUM opcode for Amsterdam (EIP-7843)."""
-        return [Opcodes.SLOTNUM] + super(Amsterdam, cls).valid_opcodes()
+        """Return list of Opcodes that are valid to work on this fork."""
+        return (
+            cls.extension_valid_opcodes()
+            + super(Amsterdam, cls).valid_opcodes()
+        )
+
+    @classmethod
+    def extension_opcode_gas_map(
+        cls,
+    ) -> Dict[OpcodeBase, int | Callable[[OpcodeBase], int]]:
+        """Return opcode gas overrides contributed by Amsterdam extensions."""
+        return amsterdam_extension_opcode_gas_map(cls.gas_costs())
 
     @classmethod
     def opcode_gas_map(
         cls,
     ) -> Dict[OpcodeBase, int | Callable[[OpcodeBase], int]]:
-        """Add SLOTNUM opcode gas cost for Amsterdam (EIP-7843)."""
-        gas_costs = cls.gas_costs()
-        base_map = super(Amsterdam, cls).opcode_gas_map()
+        """Return opcode gas costs defined for Amsterdam."""
         return {
-            **base_map,
-            Opcodes.SLOTNUM: gas_costs.GAS_BASE,
+            **super(Amsterdam, cls).opcode_gas_map(),
+            **cls.extension_opcode_gas_map(),
         }
 
     @classmethod
