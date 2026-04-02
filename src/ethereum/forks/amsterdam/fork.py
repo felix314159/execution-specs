@@ -1072,8 +1072,11 @@ def process_transaction(
     block_output.block_gas_used += tx_gas_used_after_refund
     block_output.blob_gas_used += tx_blob_gas_used
 
+    receipt_cumulative_gas_used = block_output.block_gas_used
+    receipt_logs = tx_output.logs
+
     receipt = make_receipt(
-        tx, tx_output.error, block_output.block_gas_used, tx_output.logs
+        tx, tx_output.error, receipt_cumulative_gas_used, receipt_logs
     )
 
     receipt_key = rlp.encode(Uint(index))
@@ -1085,7 +1088,7 @@ def process_transaction(
         receipt,
     )
 
-    block_output.block_logs += tx_output.logs
+    block_output.block_logs += receipt_logs
 
     for address in tx_output.accounts_to_delete:
         destroy_account(tx_state, address)
