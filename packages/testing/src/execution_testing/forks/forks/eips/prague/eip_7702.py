@@ -15,6 +15,7 @@ from execution_testing.vm import OpcodeBase
 
 from ....base_fork import (
     BaseFork,
+    RefundTypes,
     TransactionIntrinsicCostCalculator,
 )
 from ....gas_costs import GasCosts
@@ -22,6 +23,13 @@ from ....gas_costs import GasCosts
 
 class EIP7702(BaseFork):
     """EIP-7702 class."""
+
+    @classmethod
+    def refund_types(cls) -> List[RefundTypes]:
+        """Add authorization refunds for Prague set-code transactions."""
+        refunds = super(EIP7702, cls).refund_types()
+        refunds.append(RefundTypes.AUTHORIZATION_EXISTING_AUTHORITY)
+        return refunds
 
     @classmethod
     def tx_types(cls) -> List[int]:
