@@ -1,4 +1,4 @@
-name: Update Devnet Branch
+name: Build Devnet Branch
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         description: 'Devnet name (e.g., amsterdam/1, bal/2, eip-1234/3)'
         required: true
         type: string
-        default: 'bal/2'
+        default: 'bal/3'
       eip_numbers:
         description: 'List of EIP numbers (e.g., 1234,2345+3456 for eip-1234 and combined eip-2345+3456)'
         required: true
@@ -27,7 +27,7 @@ permissions:
   contents: write
 
 jobs:
-  update-devnet-branch:
+  build-devnet-branch:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -39,9 +39,15 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@e06108dd0aef18192324c70427afc47652e63a82 # v7.5.0
 
-      - name: Merge EIP branches into devnet
-        uses: ./.github/actions/merge-eip-branches
-        with:
-          fork: ${{ github.event.inputs.fork }}
-          devnet_name: ${{ github.event.inputs.devnet_name }}
-          eip_numbers: ${{ github.event.inputs.eip_numbers }}
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Dry-run devnet branch build
+        run: | # TODO: add --push
+          uv run .github/scripts/build_devnet_branch.py \
+            --fork "${{ github.event.inputs.fork }}" \
+            --devnet-name "${{ github.event.inputs.devnet_name }}" \
+            --eip-numbers "${{ github.event.inputs.eip_numbers }}" \
+            --run-static-checks
