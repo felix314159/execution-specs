@@ -30,6 +30,7 @@ from ethereum.exceptions import (
 )
 from ethereum.forks.bpo5.blocks import Header as PreviousHeader
 from ethereum.state import EMPTY_CODE_HASH, Address, BlockDiff, PreState
+from ethereum.utils.byte import left_pad_zero_bytes
 
 from . import vm
 from .block_access_lists import (
@@ -677,8 +678,25 @@ def calculate_receipt_logs(
     tx_state: TransactionState, tx_output: MessageCallOutput
 ) -> Tuple[Log, ...]:
     """Return the logs that should appear in the transaction receipt."""
-    del tx_state
-    return tx_output.logs
+    # EIP-7708: Emit burn logs for balances held by accounts marked for
+    # deletion after final fee settlement.
+    finalization_logs: List[Log] = []
+    for address in sorted(tx_output.accounts_to_delete):
+        balance = get_account(tx_state, address).balance
+        if balance > U256(0):
+            padded_address = left_pad_zero_bytes(address, 32)
+            finalization_logs.append(
+                Log(
+                    address=vm.SYSTEM_ADDRESS,
+                    topics=(
+                        vm.BURN_TOPIC,
+                        Hash32(padded_address),
+                    ),
+                    data=balance.to_be_bytes32(),
+                )
+            )
+
+    return tx_output.logs + tuple(finalization_logs)
 
 
 def process_checked_system_transaction(
