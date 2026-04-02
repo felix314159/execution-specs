@@ -673,6 +673,14 @@ def make_receipt(
     return encode_receipt(tx, receipt)
 
 
+def calculate_receipt_logs(
+    tx_state: TransactionState, tx_output: MessageCallOutput
+) -> Tuple[Log, ...]:
+    """Return the logs that should appear in the transaction receipt."""
+    del tx_state
+    return tx_output.logs
+
+
 def process_checked_system_transaction(
     block_env: vm.BlockEnvironment,
     target_address: Address,
@@ -1069,11 +1077,11 @@ def process_transaction(
     ):
         destroy_account(tx_state, block_env.coinbase)
 
+    receipt_logs = calculate_receipt_logs(tx_state, tx_output)
     block_output.block_gas_used += tx_gas_used_after_refund
     block_output.blob_gas_used += tx_blob_gas_used
 
     receipt_cumulative_gas_used = block_output.block_gas_used
-    receipt_logs = tx_output.logs
 
     receipt = make_receipt(
         tx, tx_output.error, receipt_cumulative_gas_used, receipt_logs
