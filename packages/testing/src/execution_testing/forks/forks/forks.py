@@ -36,6 +36,15 @@ from ..gas_costs import GasCosts
 from . import eips
 from .helpers import ceiling_division
 
+if TYPE_CHECKING:
+
+    class _AmsterdamEIPsForTyping(BaseFork):
+        """Typing-only stand-in for Amsterdam EIP mixins."""
+
+        pass
+else:
+    from .eips.amsterdam import AmsterdamEIPs as _AmsterdamEIPsForTyping
+
 
 # All forks must be listed here !!! in the order they were introduced !!!
 class Frontier(
@@ -1505,7 +1514,7 @@ class BPO5(
 
 
 class Amsterdam(
-    eips.EIP7928,
+    _AmsterdamEIPsForTyping,
     BPO2,
     deployed=False,
 ):
