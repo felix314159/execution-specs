@@ -88,6 +88,16 @@ def ty(refund_type: RefundType) -> int:
 
 
 @pytest.fixture
+def state_gas_refund(fork: Fork, refund_type: RefundType) -> int:
+    """Return the state gas refund (direct return, not subject to 1/5 cap)."""
+    auth_existing = RefundType.AUTHORIZATION_EXISTING_AUTHORITY
+    if fork.is_eip_enabled(eip_number=8037) and auth_existing in refund_type:
+        gas_costs = fork.gas_costs()
+        return gas_costs.REFUND_AUTH_PER_EXISTING_ACCOUNT
+    return 0
+
+
+@pytest.fixture
 def max_refund(fork: Fork, refund_type: RefundType) -> int:
     """Return the max refund gas of the transaction."""
     gas_costs = fork.gas_costs()
@@ -96,11 +106,12 @@ def max_refund(fork: Fork, refund_type: RefundType) -> int:
         if RefundType.STORAGE_CLEAR in refund_type
         else 0
     )
-    max_refund += (
-        gas_costs.REFUND_AUTH_PER_EXISTING_ACCOUNT
-        if RefundType.AUTHORIZATION_EXISTING_AUTHORITY in refund_type
-        else 0
-    )
+    auth_existing = RefundType.AUTHORIZATION_EXISTING_AUTHORITY
+    if (
+        not fork.is_eip_enabled(eip_number=8037)
+        and auth_existing in refund_type
+    ):
+        max_refund += gas_costs.REFUND_AUTH_PER_EXISTING_ACCOUNT
     return max_refund
 
 
@@ -168,6 +179,7 @@ def execution_gas_used(
     tx_intrinsic_gas_cost_before_execution: int,
     tx_floor_data_cost: int,
     max_refund: int,
+    state_gas_refund: int,
     prefix_code_gas: int,
     refund_test_type: RefundTestType,
 ) -> int:
@@ -185,7 +197,9 @@ def execution_gas_used(
 
     def execution_gas_cost(execution_gas: int) -> int:
         total_gas_used = tx_intrinsic_gas_cost_before_execution + execution_gas
-        return total_gas_used - min(max_refund, total_gas_used // 5)
+        effective_gas = total_gas_used - state_gas_refund
+        capped_refund = min(max_refund, effective_gas // 5)
+        return effective_gas - capped_refund
 
     execution_gas = prefix_code_gas
 
@@ -227,12 +241,14 @@ def refund(
     tx_intrinsic_gas_cost_before_execution: int,
     execution_gas_used: int,
     max_refund: int,
+    state_gas_refund: int,
 ) -> int:
     """Return the refund gas of the transaction."""
     total_gas_used = (
         tx_intrinsic_gas_cost_before_execution + execution_gas_used
     )
-    return min(max_refund, total_gas_used // 5)
+    effective_gas = total_gas_used - state_gas_refund
+    return min(max_refund, effective_gas // 5)
 
 
 @pytest.fixture
@@ -336,15 +352,15 @@ def test_gas_refunds_from_data_floor(
     tx_intrinsic_gas_cost_before_execution: int,
     execution_gas_used: int,
     refund: int,
+    state_gas_refund: int,
     refund_test_type: RefundTestType,
 ) -> None:
     """
     Test gas refunds deducted from the execution gas cost and not the data
     floor.
     """
-    gas_used = (
-        tx_intrinsic_gas_cost_before_execution + execution_gas_used - refund
-    )
+    total_gas = tx_intrinsic_gas_cost_before_execution + execution_gas_used
+    gas_used = total_gas - state_gas_refund - refund
     if (
         refund_test_type
         == RefundTestType.EXECUTION_GAS_MINUS_REFUND_LESS_THAN_DATA_FLOOR
