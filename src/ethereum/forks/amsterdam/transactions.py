@@ -611,23 +611,12 @@ def calculate_intrinsic_cost(tx: Transaction) -> Tuple[Uint, Uint]:
     2. Cost for data (zero and non-zero bytes)
     3. Cost for contract creation (if applicable)
     4. Cost for access list entries (if applicable)
-    5. Cost for access list data (if applicable)
-    6. Cost for authorizations (if applicable)
+    5. Cost for authorizations (if applicable)
 
-    Access lists incur data costs in addition to storage access costs. Token
-    counting uses
-    [`CALLDATA_TOKENS_PER_ZERO_BYTE`](
-        ref:ethereum.forks.amsterdam.transactions.CALLDATA_TOKENS_PER_ZERO_BYTE
-    )
-    and
-    [`CALLDATA_TOKENS_PER_NONZERO_BYTE`](
-        ref:ethereum.forks.amsterdam.transactions.CALLDATA_TOKENS_PER_NONZERO_BYTE
-    ).
 
     This function takes a transaction as a parameter and returns the intrinsic
     gas cost of the transaction and the minimum gas cost used by the
-    transaction based on the calldata and access list size.
-
+    transaction based on the calldata size.
     """
     from .vm.eoa_delegation import GAS_AUTH_PER_EMPTY_ACCOUNT
     from .vm.gas import init_code_cost
@@ -641,19 +630,14 @@ def calculate_intrinsic_cost(tx: Transaction) -> Tuple[Uint, Uint]:
     else:
         create_cost = Uint(0)
 
-    # Calculate access-list tokens and costs.
     access_list_cost = Uint(0)
     tokens_in_access_list = Uint(0)
     if has_access_list(tx):
         for access in tx.access_list:
-            # Storage access costs.
             access_list_cost += GAS_TX_ACCESS_LIST_ADDRESS
             access_list_cost += (
                 ulen(access.slots) * GAS_TX_ACCESS_LIST_STORAGE_KEY
             )
-
-    # Data token floor cost for access list bytes.
-    access_list_cost += tokens_in_access_list * GAS_TX_DATA_TOKEN_FLOOR
 
         # Count data tokens in the access list.
         access_list_data = b""
@@ -662,8 +646,9 @@ def calculate_intrinsic_cost(tx: Transaction) -> Tuple[Uint, Uint]:
             for slot in access.slots:
                 access_list_data += bytes(slot)
         tokens_in_access_list = count_tokens_in_data(access_list_data)
-        # Always charge data cost for the access list.
-        access_list_cost += tokens_in_access_list * GAS_TX_DATA_TOKEN_FLOOR
+
+    # Data token floor cost for access list bytes.
+    access_list_cost += tokens_in_access_list * GAS_TX_DATA_TOKEN_FLOOR
 
     auth_cost = Uint(0)
     if isinstance(tx, SetCodeTransaction):
