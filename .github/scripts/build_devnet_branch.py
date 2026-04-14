@@ -1,17 +1,21 @@
 # /// script
 # requires-python = ">=3.11"
+# dependencies = [
+#     "click",
+# ]
 # ///
 """Build a devnet branch by merging EIP branches onto a fork base."""
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
+
+import click
 
 EIP_PATTERN = re.compile(r"^[0-9]+(?:\+[0-9]+)*$")
 CANONICAL_REMOTE_SUFFIXES = (
@@ -47,7 +51,7 @@ def run_command(args: Sequence[str]) -> None:
     subprocess.run(args, check=True, text=True, env=env)
 
 
-def run_static_checks() -> None:
+def run_static_checks_suite() -> None:
     """Run the static checks used for devnet assembly, excluding codespell."""
     commands = [
         ["uv", "run", "ruff", "check"],
@@ -266,101 +270,100 @@ def push_branch(remote: str, devnet_branch: str) -> None:
     run_git(["push", "--force-with-lease", remote, devnet_branch])
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Create or refresh a devnet branch by starting from "
-            "forks/<fork> and "
-            "merging eips/<fork>/eip-* branches in the supplied order."
-        )
-    )
-    parser.add_argument(
-        "--fork",
-        required=True,
-        help="Fork name, for example 'amsterdam'.",
-    )
-    parser.add_argument(
-        "--devnet-name",
-        required=True,
-        help="Devnet name suffix, for example 'bal/3' to build devnets/bal/3.",
-    )
-    parser.add_argument(
-        "--eip-numbers",
-        required=True,
-        help="Comma-separated EIP numbers, e.g. '8024,7843,7708,7778'.",
-    )
-    parser.add_argument(
-        "--remote",
-        help=(
-            "Git remote containing the fork, EIP, and devnet branches. "
-            "Defaults to the remote whose URL points to "
-            "ethereum/execution-specs."
-        ),
-    )
-    parser.add_argument(
-        "--push",
-        action="store_true",
-        help=(
-            "Push the assembled devnet branch back to the remote "
-            "with --force-with-lease."
-        ),
-    )
-    parser.add_argument(
-        "--run-static-checks",
-        action="store_true",
-        help="Run static checks before pushing, excluding codespell.",
-    )
-    parser.add_argument(
-        "--use-local-branches",
-        action="store_true",
-        help=(
-            "Prefer existing local fork and EIP branches when present. "
-            "Otherwise fall back to the remote."
-        ),
-    )
-    return parser.parse_args()
-
-
-def main() -> int:
-    """Build the requested devnet branch."""
-    args = parse_args()
-    devnet_branch = f"devnets/{args.devnet_name}"
+@click.command()
+@click.option(
+    "--fork",
+    required=True,
+    help="Fork name, for example 'amsterdam'.",
+)
+@click.option(
+    "--devnet-name",
+    required=True,
+    help=("Devnet name suffix, for example 'bal/3' to build devnets/bal/3."),
+)
+@click.option(
+    "--eip-numbers",
+    required=True,
+    help="Comma-separated EIP numbers, e.g. '8024,7843,7708,7778'.",
+)
+@click.option(
+    "--remote",
+    default=None,
+    help=(
+        "Git remote containing the fork, EIP, and devnet branches. "
+        "Defaults to the remote whose URL points to "
+        "ethereum/execution-specs."
+    ),
+)
+@click.option(
+    "--push",
+    is_flag=True,
+    default=False,
+    help=(
+        "Push the assembled devnet branch back to the remote "
+        "with --force-with-lease."
+    ),
+)
+@click.option(
+    "--run-static-checks",
+    is_flag=True,
+    default=False,
+    help="Run static checks before pushing, excluding codespell.",
+)
+@click.option(
+    "--use-local-branches",
+    is_flag=True,
+    default=False,
+    help=(
+        "Prefer existing local fork and EIP branches when present. "
+        "Otherwise fall back to the remote."
+    ),
+)
+def main(
+    fork: str,
+    devnet_name: str,
+    eip_numbers: str,
+    remote: str | None,
+    push: bool,
+    run_static_checks: bool,
+    use_local_branches: bool,
+) -> None:
+    """Build a devnet branch from a fork base and EIP branches."""
+    devnet_branch = f"devnets/{devnet_name}"
     original_branch: str | None = None
     restore_original_branch_at_exit = False
-    build_failed = False
-    merge_conflict_detected = False
+    build_error: str | None = None
     restore_failed = False
-    return_code = 0
 
     try:
         original_branch = get_current_branch()
-        remote = args.remote or detect_canonical_remote()
-        eip_numbers = parse_eip_numbers(args.eip_numbers)
-        fork_branch = f"forks/{args.fork}"
+        resolved_remote = remote or detect_canonical_remote()
+        parsed_eip_numbers = parse_eip_numbers(eip_numbers)
+        fork_branch = f"forks/{fork}"
 
         ensure_clean_tracked_worktree()
         ensure_valid_branch_name(devnet_branch)
         ensure_valid_branch_name(fork_branch)
 
         eip_branches = [
-            f"eips/{args.fork}/eip-{eip_number}" for eip_number in eip_numbers
+            f"eips/{fork}/eip-{eip_number}"
+            for eip_number in parsed_eip_numbers
         ]
         for eip_branch in eip_branches:
             ensure_valid_branch_name(eip_branch)
 
-        run_git(["fetch", remote, "--prune"])
+        run_git(["fetch", resolved_remote, "--prune"])
 
         fork_ref = resolve_branch_ref(
             branch=fork_branch,
-            remote=remote,
-            use_local_branches=args.use_local_branches,
+            remote=resolved_remote,
+            use_local_branches=use_local_branches,
         )
         eip_refs = {
             eip_branch: resolve_branch_ref(
                 branch=eip_branch,
-                remote=remote,
-                use_local_branches=args.use_local_branches,
+                remote=resolved_remote,
+                use_local_branches=use_local_branches,
             )
             for eip_branch in eip_branches
         }
@@ -371,46 +374,43 @@ def main() -> int:
         for eip_branch in eip_branches:
             merge_eip_branch(devnet_branch, eip_branch, eip_refs[eip_branch])
 
-        if args.run_static_checks:
+        if run_static_checks:
             print("Running static checks on the assembled devnet branch")
-            run_static_checks()
+            run_static_checks_suite()
 
-        if args.push:
-            push_branch(remote, devnet_branch)
-    except (RuntimeError, ValueError, subprocess.CalledProcessError) as error:
-        print(f"Error: {error}", file=sys.stderr)
-        build_failed = True
-        if (
-            isinstance(error, RuntimeError)
-            and "merge conflict" in str(error).lower()
-        ):
-            merge_conflict_detected = True
-        return_code = 1
+        if push:
+            push_branch(resolved_remote, devnet_branch)
+    except (
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as error:
+        build_error = str(error)
+        print(f"Error: {build_error}", file=sys.stderr)
     finally:
         if restore_original_branch_at_exit:
             try:
-                if build_failed:
+                if build_error is not None:
                     abort_in_progress_merge()
                 restore_original_branch(original_branch)
             except subprocess.CalledProcessError as error:
-                target_branch = original_branch or "the original branch"
+                target = original_branch or "the original branch"
                 print(
-                    "Error: Failed to switch back to "
-                    f"{target_branch}: {error}",
+                    f"Error: Failed to switch back to {target}: {error}",
                     file=sys.stderr,
                 )
                 restore_failed = True
 
     if restore_failed:
-        return 1
+        raise SystemExit(1)
 
-    if merge_conflict_detected:
-        print("THERE WERE MERGE CONFLICTS")
+    if build_error is not None:
+        if "merge conflict" in build_error.lower():
+            print("THERE WERE MERGE CONFLICTS")
+        raise SystemExit(1)
 
-    if return_code == 0:
-        print(f"Successfully built {devnet_branch}")
-    return return_code
+    print(f"Successfully built {devnet_branch}")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
