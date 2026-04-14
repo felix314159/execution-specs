@@ -8,8 +8,9 @@ https://eips.ethereum.org/EIPS/eip-7976
 """
 
 from dataclasses import replace
+from typing import List
 
-from execution_testing.base_types import Bytes
+from execution_testing.base_types import AccessList, Bytes
 from execution_testing.base_types.conversions import BytesConvertible
 
 from ....base_fork import BaseFork, TransactionDataFloorCostCalculator
@@ -37,7 +38,12 @@ class EIP7976(BaseFork):
         """
         gas_costs = cls.gas_costs()
 
-        def fn(*, data: BytesConvertible) -> int:
+        def fn(
+            *,
+            data: BytesConvertible,
+            access_list: List[AccessList] | None = None,
+        ) -> int:
+            del access_list
             floor_tokens = len(Bytes(data)) * 4
             return (
                 floor_tokens * gas_costs.GAS_TX_DATA_TOKEN_FLOOR
