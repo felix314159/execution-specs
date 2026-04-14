@@ -632,12 +632,14 @@ def calculate_intrinsic_cost(tx: Transaction) -> Tuple[Uint, Uint]:
         create_cost = Uint(0)
 
     access_list_cost = Uint(0)
+    tokens_in_access_list = Uint(0)
     if has_access_list(tx):
         for access in tx.access_list:
             access_list_cost += GAS_TX_ACCESS_LIST_ADDRESS
             access_list_cost += (
                 ulen(access.slots) * GAS_TX_ACCESS_LIST_STORAGE_KEY
             )
+    access_list_cost += tokens_in_access_list * GAS_TX_DATA_TOKEN_FLOOR
 
     auth_cost = Uint(0)
     if isinstance(tx, SetCodeTransaction):
@@ -647,7 +649,7 @@ def calculate_intrinsic_cost(tx: Transaction) -> Tuple[Uint, Uint]:
     floor_tokens_in_calldata = tokens_in_calldata
 
     # Total floor tokens.
-    total_floor_tokens = floor_tokens_in_calldata
+    total_floor_tokens = floor_tokens_in_calldata + tokens_in_access_list
 
     # Floor gas cost (EIP-7623: minimum gas for data-heavy transactions).
     data_floor_gas_cost = (
