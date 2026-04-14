@@ -238,6 +238,7 @@ def refund(
 @pytest.fixture
 def to(
     pre: Alloc,
+    fork: Fork,
     execution_gas_used: int,
     prefix_code: Bytecode,
     prefix_code_gas: int,
@@ -246,14 +247,50 @@ def to(
     """
     Return a contract that consumes the expected execution gas.
 
-    At the moment we naively use JUMPDEST to consume the gas, which can yield
-    very big contracts.
-
-    Ideally, we can use memory expansion to consume gas.
+    When the required gas exceeds the contract code size limit, memory
+    expansion is used to consume gas without bloating code size.
     """
     extra_gas = execution_gas_used - prefix_code_gas
+    max_code_size = fork.max_code_size()
+    # Reserve bytes for prefix_code, a possible MSTORE8 instruction, and STOP
+    max_jumpdests = max_code_size - len(prefix_code) - 1
+
+    if extra_gas <= max_jumpdests:
+        return pre.deploy_contract(
+            prefix_code + (Op.JUMPDEST * extra_gas) + Op.STOP,
+            storage=code_storage,
+        )
+
+    # Use memory expansion to consume gas without exceeding code size.
+    # Op.MSTORE8(offset, 0) costs 9 base gas (3 per PUSH + 3 for
+    # MSTORE8) plus memory expansion gas (3*w + w**2 // 512) for
+    # expanding to w = ceil((offset+1)/32) words.
+    mstore8_code_overhead = 8  # conservative bytecode size of MSTORE8
+    max_jumpdests_with_mstore = (
+        max_code_size - len(prefix_code) - mstore8_code_overhead - 1
+    )
+    mstore8_base_gas = 9
+    min_mem_gas = extra_gas - mstore8_base_gas - max_jumpdests_with_mstore
+    # Binary search for smallest word count w where 3*w + w*w//512
+    # provides at least min_mem_gas of memory expansion gas.
+    lo, hi = 0, 1_000_000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        gas = 3 * mid + mid * mid // 512
+        if gas < min_mem_gas:
+            lo = mid + 1
+        else:
+            hi = mid
+    words = lo
+    mem_gas = 3 * words + words * words // 512
+    offset = max(words * 32 - 1, 0)
+    jumpdests = extra_gas - mstore8_base_gas - mem_gas
+    assert jumpdests >= 0
     return pre.deploy_contract(
-        prefix_code + (Op.JUMPDEST * extra_gas) + Op.STOP,
+        prefix_code
+        + Op.MSTORE8(offset, 0)
+        + (Op.JUMPDEST * jumpdests)
+        + Op.STOP,
         storage=code_storage,
     )
 
