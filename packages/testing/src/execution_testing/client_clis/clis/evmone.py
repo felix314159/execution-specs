@@ -28,7 +28,7 @@ from execution_testing.exceptions.exceptions.block import BlockException
 from execution_testing.fixtures.base import FixtureFormat
 from execution_testing.fixtures.blockchain import BlockchainFixture
 from execution_testing.fixtures.state import StateFixture
-from execution_testing.forks import Fork
+from execution_testing.forks import Amsterdam, Fork
 
 from ..transition_tool import TransitionTool
 
@@ -89,6 +89,18 @@ class EvmoneFixtureConsumerCommon:
         """Initialize the EvmoneFixtureConsumerCommon class."""
         del trace
         self._info_metadata: Optional[Dict[str, Any]] = {}
+
+    def is_fork_supported(self, fork: Fork) -> bool:
+        """
+        Return whether evmone's fixture runners support the fork.
+
+        evmone (master) does not yet implement Amsterdam (EIP-7954 and the
+        rest of the Amsterdam EIPs), so it returns wrong results for those
+        fixtures (e.g. rejecting now-valid max-size initcode). Gate it off
+        here so the consume plugin can xfail the affected cases rather than
+        report spurious failures.
+        """
+        return fork < Amsterdam
 
     def _run_command(self, command: List[str]) -> subprocess.CompletedProcess:
         try:
@@ -195,6 +207,21 @@ class EvmoneFixtureConsumerCommon:
                     command, result, fixture_path, debug_output_path
                 )
 
+            # The evmone runner exits cleanly without registering any test
+            # case for fixtures it deliberately does not support, e.g.
+            # blockchain tests with invalidly rlp-encoded blocks
+            # ("tests with invalidly rlp-encoded blocks are not supported").
+            # Surface these as skips rather than letting the empty result
+            # trip the "testsuite missing" assertion in `consume_test`.
+            if result.returncode == 0 and output_data.get("tests", 0) == 0:
+                # evmone prints the reason it declined the file to stderr
+                # (e.g. "tests with invalidly rlp-encoded blocks are not
+                # supported"); stdout only carries gtest's generic banner.
+                reason = result.stderr.strip() or (
+                    "evmone registered no test case for fixture"
+                )
+                pytest.skip(f"evmone skipped fixture: {reason}")
+
             return output_data
 
     def _failure_msg(self, file_results: Dict[str, Any]) -> str:
@@ -230,10 +257,11 @@ class EvmoneFixtureConsumerCommon:
         assert fixture_name is not None, (
             "fixture_name must be provided for evmone tests"
         )
+        fixture_result_names = {fixture_name, fixture_path.stem}
         test_results = [
             test_result
             for test_result in test_suite
-            if test_result["name"] == fixture_name
+            if test_result["name"] in fixture_result_names
         ]
         assert len(test_results) < 2, (
             f"Multiple test results for {fixture_name}"

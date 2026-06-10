@@ -1,0 +1,47 @@
+#
+# Nimbus-eth1 'evmstate' and 'eest_blockchain' binaries
+#
+# Produces a standalone image with /nimbvm (the evmstate runner),
+# /eest_blockchain (the EEST blockchain fixture consumer) and
+# /txparse.nimbus.
+#
+# Build args:
+#   github   GitHub org/repo to clone     (default: status-im/nimbus-eth1)
+#   tag      Branch / tag / commit-ish    (default: master)
+#   jobs     -j<N> cap for git/make       (default: empty = all cores via nproc)
+#
+
+FROM debian:testing-slim AS builder
+
+RUN apt-get update \
+ && apt-get -y install curl build-essential git git-lfs \
+ && apt-get clean
+
+ARG github=status-im/nimbus-eth1
+ARG tag=master
+ARG jobs=
+
+RUN git clone -j${jobs:-$(nproc)} --depth 1 --branch "$tag" "https://github.com/$github" nimbus-eth1
+RUN cd nimbus-eth1 && make -j${jobs:-$(nproc)} init
+# evmstate only uses the in-memory core_db (tools/evmstate imports
+# core_db/memory_only) and links no rocksdb symbols at all, but the Makefile
+# target unconditionally depends on a vendored RocksDB+lz4+zstd static build.
+# That build downloads tarballs from github with ALL output silenced
+# (nim-rocksdb's build_static_deps.sh sends make to /dev/null), so a transient
+# curl failure surfaces only as an opaque "Error 2" after ~35s.
+# USE_SYSTEM_ROCKSDB=1 skips that target entirely: faster and no downloads.
+RUN cd nimbus-eth1 && make -j${jobs:-$(nproc)} USE_SYSTEM_ROCKSDB=1 evmstate && cp ./tools/evmstate/evmstate /nimbvm
+RUN cd nimbus-eth1 && make -j${jobs:-$(nproc)} txparse  && cp ./tools/txparse/txparse /txparse.nimbus
+# eest_blockchain (the EEST blockchain fixture consumer) contains no rocksdb
+# code either (memory-only core_db, all nim-rocksdb symbols are dead-code
+# eliminated), but merely importing nim-rocksdb's type module injects the
+# vendored static libs (vendor/nim-rocksdb/build/*.a) into the link line via
+# {.passl.}. Building those would compile all of RocksDB as one translation
+# unit (unity.o), which OOMs on smaller machines. rocksdb_dynamic_linking
+# switches that module to runtime-dynlib mode instead: nothing is linked, and
+# since no rocksdb proc survives in the binary, librocksdb.so is never loaded
+# at runtime either — the final image needs no rocksdb package.
+RUN cd nimbus-eth1 && make -j${jobs:-$(nproc)} USE_SYSTEM_ROCKSDB=1 NIMFLAGS="-d:rocksdb_dynamic_linking" eest_blockchain && cp ./build/eest_blockchain /eest_blockchain
+
+FROM debian:testing-slim
+COPY --from=builder /nimbvm /eest_blockchain /txparse.nimbus /

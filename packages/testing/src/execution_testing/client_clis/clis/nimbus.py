@@ -1,9 +1,14 @@
 """Nimbus Transition tool interface."""
 
+import json
 import re
+import shlex
+import shutil
 import subprocess
+import tempfile
+import textwrap
 from pathlib import Path
-from typing import ClassVar, Dict, Optional
+from typing import ClassVar, Dict, List, Optional
 
 from execution_testing.exceptions import (
     BlockException,
@@ -11,9 +16,160 @@ from execution_testing.exceptions import (
     ExceptionMapper,
     TransactionException,
 )
+from execution_testing.fixtures import (
+    BlockchainFixture,
+    FixtureFormat,
+)
 from execution_testing.forks import Fork
 
+from ..file_utils import dump_files_to_directory
+from ..fixture_consumer_tool import FixtureConsumerTool
 from ..transition_tool import TransitionTool
+
+
+class NimbusFixtureConsumer(
+    FixtureConsumerTool,
+    fixture_formats=[BlockchainFixture],
+):
+    """Nimbus EEST blockchain fixture consumer."""
+
+    default_binary = Path("eest_blockchain")
+    detect_binary_pattern = re.compile(
+        r"^Usage: .*eest_blockchain .*vector\.json"
+    )
+    version_flag = ""
+    cached_version: Optional[str] = None
+    trace: bool
+
+    def __init__(
+        self,
+        binary: Optional[Path] = None,
+        trace: bool = False,
+    ):
+        """Initialize the Nimbus fixture consumer."""
+        self.binary = binary if binary else self.default_binary
+        self.trace = trace
+
+    def _run_command(self, command: List[str]) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise Exception("Command failed with non-zero status.") from e
+        except Exception as e:
+            raise Exception(
+                "Unexpected exception calling Nimbus fixture consumer."
+            ) from e
+
+    def _consume_debug_dump(
+        self,
+        command: List[str],
+        result: subprocess.CompletedProcess,
+        fixture_path: Path,
+        debug_output_path: Path,
+    ) -> None:
+        assert all(isinstance(x, str) for x in command), (
+            f"Not all elements of command list are strings: {command}"
+        )
+        debug_command = command.copy()
+        debug_fixture_path = str(debug_output_path / "fixtures.json")
+        debug_command[-1] = debug_fixture_path
+        consume_direct_call = " ".join(
+            shlex.quote(arg) for arg in debug_command
+        )
+        consume_direct_script = textwrap.dedent(
+            f"""\
+            #!/bin/bash
+            {consume_direct_call}
+            """
+        )
+        dump_files_to_directory(
+            debug_output_path,
+            {
+                "consume_direct_args.py": debug_command,
+                "consume_direct_returncode.txt": result.returncode,
+                "consume_direct_stdout.txt": result.stdout,
+                "consume_direct_stderr.txt": result.stderr,
+                "consume_direct.sh+x": consume_direct_script,
+            },
+        )
+        shutil.copyfile(fixture_path, debug_fixture_path)
+
+    def _filtered_fixture_path(
+        self,
+        fixture_path: Path,
+        fixture_name: Optional[str],
+    ) -> Path:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            delete=False,
+        ) as temporary_file:
+            filtered_fixture_path = Path(temporary_file.name)
+            if fixture_name is None:
+                temporary_file.write(fixture_path.read_text())
+                return filtered_fixture_path
+
+            fixture = json.loads(fixture_path.read_text())
+            if fixture_name not in fixture:
+                filtered_fixture_path.unlink(missing_ok=True)
+                raise Exception(
+                    f"Fixture {fixture_name} not found in {fixture_path}"
+                )
+            json.dump({fixture_name: fixture[fixture_name]}, temporary_file)
+            return filtered_fixture_path
+
+    def consume_blockchain_test(
+        self,
+        fixture_path: Path,
+        fixture_name: Optional[str] = None,
+        debug_output_path: Optional[Path] = None,
+    ) -> None:
+        """Consume a blockchain test fixture via Nimbus `eest_blockchain`."""
+        filtered_fixture_path = self._filtered_fixture_path(
+            fixture_path, fixture_name
+        )
+        command = [str(self.binary), str(filtered_fixture_path)]
+        try:
+            result = self._run_command(command)
+            if debug_output_path:
+                self._consume_debug_dump(
+                    command, result, fixture_path, debug_output_path
+                )
+            if result.returncode != 0:
+                raise Exception(
+                    f"Nimbus eest_blockchain exited with non-zero exit code "
+                    f"({result.returncode}).\n"
+                    f"stdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}\n"
+                    f"{chr(32).join(command)}"
+                )
+        finally:
+            filtered_fixture_path.unlink(missing_ok=True)
+
+    def consume_fixture(
+        self,
+        fixture_format: FixtureFormat,
+        fixture_path: Path,
+        fixture_name: Optional[str] = None,
+        debug_output_path: Optional[Path] = None,
+    ) -> None:
+        """Execute the Nimbus blockchain fixture consumer."""
+        if fixture_format == BlockchainFixture:
+            self.consume_blockchain_test(
+                fixture_path=fixture_path,
+                fixture_name=fixture_name,
+                debug_output_path=debug_output_path,
+            )
+        else:
+            raise Exception(
+                f"Fixture format {fixture_format.format_name} "
+                f"not supported by {self.binary}"
+            )
 
 
 class NimbusTransitionTool(TransitionTool):

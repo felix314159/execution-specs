@@ -1,0 +1,30 @@
+#
+# go-ethereum 'evm' binary
+#
+# Produces a standalone image with the geth statetest runner at /gethvm.
+# Used both as a runnable image and as a source for `COPY --from=steel/go-ethereum`
+# in the assembly Dockerfile.
+#
+# Build args:
+#   github   GitHub org/repo to clone     (default: ethereum/go-ethereum)
+#   tag      Branch / tag / commit-ish    (default: master)
+#   jobs     GOMAXPROCS cap for `go build` (default: empty = all cores)
+#
+
+FROM golang:latest AS builder
+
+ARG github=ethereum/go-ethereum
+ARG tag=master
+ARG jobs=
+
+RUN git clone --depth 1 --branch "$tag" "https://github.com/$github" go-ethereum
+# Note: the env assignment must go through `env`, because a `VAR=val cmd`
+# prefix is only honoured by the shell when written literally — when it comes
+# from a variable expansion (${jobs:+...}) sh treats `GOMAXPROCS=$jobs` as a
+# command name and fails with "GOMAXPROCS=1: not found". `env GOMAXPROCS=1 go`
+# works; with jobs empty the expansion vanishes and it is just `env go`.
+RUN cd go-ethereum && env ${jobs:+GOMAXPROCS=$jobs} go run build/ci.go install -static ./cmd/evm
+
+FROM debian:testing-slim
+COPY --from=builder /go/go-ethereum/build/bin/evm /gethvm
+ENV GETH_BIN=/gethvm

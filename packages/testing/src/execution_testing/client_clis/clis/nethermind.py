@@ -120,10 +120,15 @@ class NethtestFixtureConsumer(
         assert fixture_name, "Fixture name must be provided for nethtest."
         command = [str(self.binary)]
         if fixture_format is BlockchainFixture:
+            # nethtest names blockchain tests with the short (post-`::`) name
+            # only, and matches `--filter` as `^(<filter>)` against it. Passing
+            # the full `path::name` would match nothing, so nethtest would run
+            # zero tests and exit 0 — a silent (vacuous) pass.
+            short_fixture_name = fixture_name.rsplit("::", maxsplit=1)[-1]
             command += [
                 "--blockTest",
                 "--filter",
-                f"{re.escape(fixture_name)}",
+                f"{re.escape(short_fixture_name)}",
             ]
         elif fixture_format is StateFixture:
             # TODO: consider using `--filter` here to readily access traces
@@ -204,6 +209,7 @@ class NethtestFixtureConsumer(
         if fixture_name:
             # TODO: this check is too fragile; extend for ethereum/tests?
             nethtest_suffix = "_d0g0v0_"
+            short_fixture_name = fixture_name.rsplit("::", maxsplit=1)[-1]
             assert all(
                 test_result["name"].endswith(nethtest_suffix)
                 for test_result in file_results
@@ -215,7 +221,7 @@ class NethtestFixtureConsumer(
                 test_result
                 for test_result in file_results
                 if test_result["name"].removesuffix(nethtest_suffix)
-                == f"{fixture_name.split('/')[-1]}"
+                == short_fixture_name
             ]
             assert len(test_result) < 2, (
                 f"Multiple test results for {fixture_name}"
@@ -236,6 +242,27 @@ class NethtestFixtureConsumer(
                 )
                 raise Exception(exception_text)
 
+    @staticmethod
+    def _parse_blocktest_statuses(stdout: str) -> Dict[str, str]:
+        """
+        Map each executed blockchain test name to its `PASS`/`FAIL` verdict.
+
+        nethtest prints one line per executed test: the (short) test name
+        left-padded to a fixed width, followed by `PASS` or `FAIL`. Any
+        leftover ANSI color codes are stripped before parsing.
+        """
+        ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
+        statuses: Dict[str, str] = {}
+        for raw_line in stdout.splitlines():
+            line = ansi_escape.sub("", raw_line).rstrip()
+            for status in ("PASS", "FAIL"):
+                if line.endswith(status):
+                    name = line[: -len(status)].strip()
+                    if name:
+                        statuses[name] = status
+                    break
+        return statuses
+
     def consume_blockchain_test(
         self,
         command: Tuple[str, ...],
@@ -245,7 +272,6 @@ class NethtestFixtureConsumer(
     ) -> None:
         """Execute the the fixture at `fixture_path` via `nethtest`."""
         del fixture_path
-        del fixture_name
         result = subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
@@ -253,6 +279,9 @@ class NethtestFixtureConsumer(
         if debug_output_path:
             self._consume_debug_dump(command, result, debug_output_path)
 
+        # A non-zero exit code signals a hard failure (e.g. nethtest throws an
+        # unhandled assertion on a post-state mismatch before printing a
+        # verdict), so surface it directly.
         if result.returncode != 0:
             raise Exception(
                 f"nethtest exited with non-zero exit code "
@@ -261,6 +290,43 @@ class NethtestFixtureConsumer(
                 f"stderr:\n{result.stderr}\n"
                 f"{' '.join(command)}"
             )
+
+        # A zero exit code is not sufficient: nethtest exits 0 both when the
+        # `--filter` matches no test (running nothing) and when a test runs but
+        # reports `FAIL` (e.g. an invalid block that was wrongly accepted).
+        # Parse the per-test verdict to reject both cases.
+        statuses = self._parse_blocktest_statuses(result.stdout)
+        if fixture_name is not None:
+            short_fixture_name = fixture_name.rsplit("::", maxsplit=1)[-1]
+            assert short_fixture_name in statuses, (
+                f"nethtest ran no blockchain test matching "
+                f"'{short_fixture_name}' (filter matched nothing).\n"
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}\n"
+                f"{' '.join(command)}"
+            )
+            if statuses[short_fixture_name] != "PASS":
+                raise Exception(
+                    f"Blockchain test '{short_fixture_name}' failed.\n"
+                    f"stdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}"
+                )
+        else:
+            if not statuses:
+                raise Exception(
+                    f"nethtest ran no blockchain tests.\n"
+                    f"stdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}"
+                )
+            failed = [
+                name for name, status in statuses.items() if status != "PASS"
+            ]
+            if failed:
+                raise Exception(
+                    "Blockchain test(s) failed: "
+                    + ", ".join(failed)
+                    + f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+                )
 
     def consume_fixture(
         self,

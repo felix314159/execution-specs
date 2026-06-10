@@ -144,8 +144,11 @@ class EthereumCLI:
             # adding more logging reveals we check for `-v` twice..
 
             try:
+                command = (
+                    [binary] if version_flag == "" else [binary, version_flag]
+                )
                 result = subprocess.run(
-                    [binary, version_flag],
+                    command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
@@ -154,7 +157,7 @@ class EthereumCLI:
                     f"stderr: {result.stderr!r}\n\n\n"
                 )
 
-                if result.returncode != 0:
+                if result.returncode != 0 and version_flag != "":
                     logger.debug(
                         "Subprocess returncode is not 0! "
                         f"It is: {result.returncode}"
@@ -260,9 +263,15 @@ class EthereumCLI:
         the CLI's version flag.
         """
         if self.cached_version is None:
+            command = (
+                [str(self.binary)]
+                if self.version_flag == ""
+                else [str(self.binary), self.version_flag]
+            )
             result = subprocess.run(
-                [str(self.binary), self.version_flag],
+                command,
                 stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
 
             if result.returncode != 0:

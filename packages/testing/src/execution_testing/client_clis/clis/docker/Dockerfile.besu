@@ -1,0 +1,31 @@
+#
+# Besu 'evmtool' binary
+#
+# Produces a standalone image with besu's evmtool installed at /evmtool/.
+# Runtime requires a JRE (openjdk-25-jre-headless).
+#
+# Build args:
+#   github   GitHub org/repo to clone     (default: hyperledger/besu)
+#   tag      Branch / tag / commit-ish    (default: main)
+#   jobs     Gradle max-workers cap       (default: empty = gradle's default)
+#
+
+FROM ubuntu:24.04 AS builder
+
+RUN apt-get update -q && apt-get install -qy --no-install-recommends \
+    git ca-certificates \
+    openjdk-25-jdk-headless=25* libjemalloc-dev=5.*
+
+ARG github=hyperledger/besu
+ARG tag=main
+ARG jobs=
+
+RUN git clone --depth 1 --branch "$tag" "https://github.com/$github" besu
+RUN cd besu && ./gradlew --parallel ${jobs:+--max-workers=$jobs} ethereum:evmtool:installDist
+RUN mkdir /out && mv besu/ethereum/evmtool/build/install/evmtool /out/evmtool
+
+FROM ubuntu:24.04
+RUN apt-get update -q && apt-get install -qy --no-install-recommends openjdk-25-jre-headless && apt-get clean
+COPY --from=builder /out/evmtool /evmtool
+RUN ln -s /evmtool/bin/evmtool /besu-vm
+ENV BESU_BIN=/evmtool/bin/evmtool

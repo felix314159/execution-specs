@@ -1,0 +1,36 @@
+#
+# EVMONE
+#
+# evmone requires g++ v13, which is _not_ available in debian bookworm (the
+# golang image) but works with debian:testing (at time of writing).
+#
+# Build args:
+#   github   GitHub org/repo to clone     (default: ethereum/evmone)
+#   tag      Branch / tag / commit-ish    (default: master)
+#   jobs     Build-time parallelism cap   (default: empty = all cores).
+#            Lower this (e.g. jobs=2) on memory-constrained hosts — evmone's
+#            C++ TUs each pull in libgmp + heavy templates, so unconstrained
+#            cmake --parallel can easily exceed 10 GB of RAM.
+#
+
+FROM debian:testing-slim
+RUN apt-get update -q && apt-get install -qy --no-install-recommends git make \
+    ca-certificates g++ cmake ninja-build libgmp-dev
+RUN apt-get install gcc-13 g++-13 -qy
+
+ARG github=ethereum/evmone
+ARG tag=master
+ARG jobs=
+
+RUN git clone --depth 1 --recurse-submodules --branch "$tag" "https://github.com/$github" evmone
+# See https://github.com/ipsilon/evmone/issues/1314#issuecomment-3347426201
+RUN cd evmone && CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 cmake -S . -B build -DEVMONE_TESTING=ON -DEVMONE_PRECOMPILES_GMP=1
+# Build the evmone-statetest and evmone-blockchaintest tools that consume
+# direct uses; their link dependency libevmone.so is built transitively.
+# Without --target, -DEVMONE_TESTING=ON's default build pulls in every other
+# target too (bench, unittests, fuzzer, …), none of which we ship.
+# `cmake --build --parallel` with no number = use all cores; `--parallel N`
+# caps at N. Quoting ${jobs} preserves "no number" when jobs is empty.
+RUN cd evmone && cmake --build build --target evmone-statetest evmone-blockchaintest --parallel ${jobs}
+RUN cp /evmone/build/bin/evmone-statetest /evmone-statetest
+RUN cp /evmone/build/lib/libevmone.so.* /

@@ -528,12 +528,105 @@ class BesuFixtureConsumer(
                 f"Error:\n{result.stderr}"
             )
 
-        # Parse text output for failures
+        # Besu reports fixture load/parse problems (e.g. an unrecognized
+        # field in the fixture, or a missing file) on stdout while still
+        # exiting 0. Treat those as failures so a fixture that could not be
+        # parsed is not silently reported as a pass.
         stdout = result.stdout
-        if "Failed:" in stdout:
-            failed_match = re.search(r"Failed:\s+(\d+)", stdout)
-            if failed_match and int(failed_match.group(1)) > 0:
-                raise Exception(f"Blockchain test failed:\n{stdout}")
+        for load_error in ("File content error", "File not found"):
+            if load_error in stdout:
+                raise Exception(
+                    f"Besu could not load the fixture "
+                    f"({load_error}):\n{stdout}\n{result.stderr}"
+                )
+
+        # Besu prints a "TEST SUMMARY" with `Passed`/`Failed` counts. Require
+        # the summary to be present, at least one test to have run, and no
+        # failures — otherwise a filter that matched nothing (or output we
+        # failed to recognize) would be a silent vacuous pass.
+        passed_match = re.search(r"Passed:\s+(\d+)", stdout)
+        failed_match = re.search(r"Failed:\s+(\d+)", stdout)
+        if passed_match is None or failed_match is None:
+            raise Exception(
+                f"Could not find Besu test summary; the blockchain test "
+                f"may not have run:\n{stdout}\n{result.stderr}"
+            )
+        if int(failed_match.group(1)) > 0:
+            raise Exception(f"Blockchain test failed:\n{stdout}")
+        if int(passed_match.group(1)) < 1:
+            raise Exception(
+                f"Besu ran no blockchain tests (vacuous pass):\n{stdout}"
+            )
+
+    @staticmethod
+    @cache
+    def _load_state_test_fixture_file(fixture_path: Path) -> Dict[str, Any]:
+        """Load (and cache) the raw JSON of a state test fixture file."""
+        with open(fixture_path) as f:
+            fixtures: Dict[str, Any] = json.load(f)
+        return fixtures
+
+    def _expected_post_for_result(
+        self, fixture_path: Path, result: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the fixture post entry matching a Besu state-test result.
+
+        The result's fork and data/gas/value indexes select the post
+        entry of the named test within the fixture file.
+        """
+        fixture = self._load_state_test_fixture_file(fixture_path).get(
+            result["name"]
+        )
+        if fixture is None:
+            return None
+        result_indexes = (
+            result.get("d", 0),
+            result.get("g", 0),
+            result.get("v", 0),
+        )
+        for post in fixture.get("post", {}).get(result.get("fork"), []):
+            post_indexes = post.get("indexes", {})
+            if result_indexes == (
+                post_indexes.get("data", 0),
+                post_indexes.get("gas", 0),
+                post_indexes.get("value", 0),
+            ):
+                return post
+        return None
+
+    def _assert_state_test_result(
+        self, fixture_path: Path, result: Dict[str, Any]
+    ) -> None:
+        """
+        Assert a single Besu state-test result against the fixture.
+
+        Besu's ``state-test`` reports ``pass: false`` together with a
+        ``validationError`` when it rejects a transaction, even when the
+        fixture expects exactly that rejection (``expectException``).
+        Such a result is a pass if the reported state root also matches
+        the fixture's post state (a rejected transaction must not mutate
+        state).
+        """
+        post = self._expected_post_for_result(fixture_path, result)
+        expect_exception = post.get("expectException") if post else None
+        if not post or expect_exception is None:
+            assert result["pass"], (
+                f"State test failed: {result.get('error', 'unknown error')}"
+            )
+            return
+        assert not result["pass"] and result.get("validationError"), (
+            f"State test failed: expected the transaction to be "
+            f"rejected ({expect_exception}), but it was accepted"
+        )
+        reported_root = str(result.get("stateRoot", "")).lower()
+        expected_root = str(post["hash"]).lower()
+        assert reported_root == expected_root, (
+            f"State test failed: transaction was rejected as expected "
+            f"({expect_exception}), but the reported post state root "
+            f"{reported_root} does not match the expected "
+            f"{expected_root}"
+        )
 
     @cache  # noqa
     def consume_state_test_file(
@@ -618,18 +711,16 @@ class BesuFixtureConsumer(
             assert len(test_result) == 1, (
                 f"Test result for {fixture_name} missing"
             )
-            assert test_result[0]["pass"], (
-                f"State test failed: "
-                f"{test_result[0].get('error', 'unknown error')}"
-            )
+            self._assert_state_test_result(fixture_path, test_result[0])
         else:
-            if any(not r["pass"] for r in file_results):
-                exception_text = "State test failed: \n" + "\n".join(
-                    f"{r['name']}: " + r.get("error", "unknown error")
-                    for r in file_results
-                    if not r["pass"]
-                )
-                raise Exception(exception_text)
+            errors = []
+            for r in file_results:
+                try:
+                    self._assert_state_test_result(fixture_path, r)
+                except AssertionError as e:
+                    errors.append(f"{r['name']}: {e}")
+            if errors:
+                raise Exception("State test failed: \n" + "\n".join(errors))
 
     def consume_fixture(
         self,

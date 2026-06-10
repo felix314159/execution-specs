@@ -1,0 +1,24 @@
+#
+# revm 'revme' binary (used as the reth EVM)
+#
+# Produces a standalone image with revme at /revme.
+#
+# Build args:
+#   github   GitHub org/repo to clone     (default: bluealloy/revm)
+#   tag      Branch / tag / commit-ish    (default: main)
+#   jobs     `cargo --jobs N` cap         (default: empty = cargo's default)
+#
+
+FROM lukemathwalker/cargo-chef:latest-rust-1 AS builder
+RUN apt-get update -q && apt-get install -qy --no-install-recommends libclang-dev pkg-config
+
+ARG github=bluealloy/revm
+ARG tag=main
+ARG jobs=
+
+RUN git clone --depth 1 --branch "$tag" "https://github.com/$github" revm
+RUN cd revm && cargo build --release ${jobs:+--jobs $jobs} --package revme
+
+FROM debian:testing-slim
+COPY --from=builder /revm/target/release/revme /revme
+ENV RETH_BIN=/revme

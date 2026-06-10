@@ -1,0 +1,30 @@
+#
+# Erigon 'evm' binary
+#
+# Produces a standalone image with the erigon statetest runner at /erigon_vm.
+#
+# Build args:
+#   github   GitHub org/repo to clone     (default: erigontech/erigon)
+#   tag      Branch / tag / commit-ish    (default: main)
+#   jobs     GOMAXPROCS + `make -jN` cap  (default: empty = all cores)
+#
+
+FROM golang:latest AS builder
+
+ARG github=erigontech/erigon
+ARG tag=main
+ARG jobs=
+
+RUN git clone --depth 1 --branch "$tag" "https://github.com/$github" erigon
+# `make evm` ultimately shells out to `go build`, so the real parallelism lever
+# is GOMAXPROCS (the `make -j` cap alone barely matters for a single go build).
+# The env assignment must go through `env`, because a `VAR=val cmd` prefix is
+# only honoured by the shell when written literally — when it comes from a
+# variable expansion (${jobs:+...}) sh treats `GOMAXPROCS=$jobs` as a command
+# name and fails with "GOMAXPROCS=1: not found". `env GOMAXPROCS=1 make` works;
+# with jobs empty the expansion vanishes and it is just `env make`.
+RUN cd erigon && env ${jobs:+GOMAXPROCS=$jobs} make ${jobs:+-j$jobs} evm
+
+FROM debian:testing-slim
+COPY --from=builder /go/erigon/build/bin/evm /erigon_vm
+ENV ERIG_BIN=/erigon_vm

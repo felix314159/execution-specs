@@ -1,0 +1,28 @@
+- client: besu
+  build_args:
+    github: besu-eth/besu
+    tag: main
+- client: erigon
+  build_args:
+    github: erigontech/erigon
+    tag: main
+- client: go-ethereum
+  build_args:
+    github: ethereum/go-ethereum
+    tag: master
+- client: nethermind
+  build_args:
+    github: NethermindEth/nethermind
+    tag: master
+- client: nimbus-el
+  build_args:
+    github: status-im/nimbus-eth1
+    tag: master
+- client: reth
+  build_args:
+    github: bluealloy/revm
+    tag: main
+- client: evmone
+  build_args:
+    github: ethereum/evmone
+    tag: master

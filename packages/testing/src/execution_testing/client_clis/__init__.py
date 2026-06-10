@@ -33,7 +33,13 @@ from .clis.evmone import (
 from .clis.execution_specs import ExecutionSpecsTransitionTool
 from .clis.geth import GethFixtureConsumer, GethTransitionTool
 from .clis.nethermind import Nethtest, NethtestFixtureConsumer
-from .clis.nimbus import NimbusTransitionTool
+from .clis.nimbus import NimbusFixtureConsumer, NimbusTransitionTool
+from .clis.reth import RethExceptionMapper, RevmeFixtureConsumer
+from .docker import (
+    DockerClient,
+    docker_client_for_image,
+    fixture_consumers_from_docker_image,
+)
 from .ethereum_cli import CLINotFoundInPathError, UnknownCLIError
 from .filler_backend import FillerBackend
 from .fixture_consumer_tool import FixtureConsumerTool
@@ -59,6 +65,7 @@ __all__ = (
     "CLINotFoundInPathError",
     "ClientBackend",
     "ClientBackendExceptionMapper",
+    "DockerClient",
     "ErigonExceptionMapper",
     "ErigonFixtureConsumer",
     "EthereumJSTransitionTool",
@@ -68,6 +75,8 @@ __all__ = (
     "EvmOneBlockchainFixtureConsumer",
     "ExecutionSpecsTransitionTool",
     "FieldExclusionTraceComparator",
+    "docker_client_for_image",
+    "fixture_consumers_from_docker_image",
     "FillerBackend",
     "FixtureConsumerTool",
     "GasExhaustionTraceComparator",
@@ -76,6 +85,9 @@ __all__ = (
     "LazyAlloc",
     "Nethtest",
     "NethtestFixtureConsumer",
+    "NimbusFixtureConsumer",
+    "RethExceptionMapper",
+    "RevmeFixtureConsumer",
     "NimbusTransitionTool",
     "Result",
     "TraceComparator",

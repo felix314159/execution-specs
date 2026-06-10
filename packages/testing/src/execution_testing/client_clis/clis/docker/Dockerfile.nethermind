@@ -1,0 +1,45 @@
+#
+# Nethermind 'nethtest' + 'TxParser'
+#
+# Produces a standalone image with the nethtest runner at /neth/nethtest and
+# the TxParser tool in /neth/. Runtime requires libssl.
+#
+# Build args:
+#   github   GitHub org/repo to clone     (default: NethermindEth/nethermind)
+#   tag      Branch / tag / commit-ish    (default: master)
+#
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble AS builder
+
+ARG github=NethermindEth/nethermind
+ARG tag=master
+# TARGETARCH is auto-injected by buildkit (amd64, arm64, …). Translate it
+# to a dotnet RID (linux-x64, linux-arm64) — matches the convention in
+# NethermindEth/nethermind's upstream Dockerfile.
+ARG TARGETARCH
+# jobs caps msbuild parallelism (-maxcpucount:N). Empty = dotnet's default.
+ARG jobs=
+
+RUN git clone --depth 1 --branch "$tag" "https://github.com/$github" nethermind
+
+RUN arch=$([ "$TARGETARCH" = "amd64" ] && echo "x64" || echo "${TARGETARCH:-x64}") && \
+    rid="linux-${arch}" && \
+    echo "$rid" > /rid && \
+    cd nethermind && dotnet publish src/Nethermind/Nethermind.Test.Runner \
+        --self-contained true -r "$rid" -c Release -o /publish \
+        -p:ErrorOnDuplicatePublishOutputFiles=false \
+        ${jobs:+-maxcpucount:$jobs}
+RUN rid=$(cat /rid) && mkdir /out && \
+    mv "/nethermind/src/Nethermind/artifacts/bin/Nethermind.Test.Runner/release_${rid}" /out/neth
+
+# TxParser
+RUN rid=$(cat /rid) && cd nethermind/tools/TxParser && \
+    dotnet publish --self-contained true -r "$rid" -c Release
+RUN rid=$(cat /rid) && \
+    cp -rT "/nethermind/tools/artifacts/publish/TxParser/release_${rid}/" /out/neth/
+
+FROM debian:testing-slim
+RUN apt-get update -q && apt-get install -qy --no-install-recommends libssl-dev && apt-get clean
+COPY --from=builder /out/neth /neth
+RUN ln -s /neth/nethtest /nethtest
+ENV NETH_BIN=/neth/nethtest
