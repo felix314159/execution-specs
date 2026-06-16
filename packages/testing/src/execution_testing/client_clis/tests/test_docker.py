@@ -182,6 +182,21 @@ def test_docker_session_container_not_host_user_by_default() -> None:
     assert "/gethvm" in script
 
 
+def test_start_backend_false_starts_no_container() -> None:
+    """
+    The xdist controller (``start_backend=False``) builds the consumers for
+    collection but starts no container, so only the workers do work.
+    """
+    (consumer,) = fixture_consumers_from_docker_image(
+        "steel/go-ethereum:master", start_backend=False
+    )
+    # No container was started for the controller...
+    assert _start_requests() == []
+    # ...but the consumer still exists with the same image id, so collection
+    # ids match the workers'.
+    assert getattr(consumer, "docker_image", None) == "steel/go-ethereum:master"
+
+
 def test_docker_falls_back_to_run_when_no_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

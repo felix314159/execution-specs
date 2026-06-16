@@ -9,6 +9,7 @@ import click
 from .base import ArgumentProcessor, PytestCommand, common_pytest_options
 from .processors import (
     ConsumeCommandProcessor,
+    DockerParallelismProcessor,
     HelpFlagsProcessor,
     HiveEnvironmentProcessor,
 )
@@ -31,7 +32,12 @@ def create_consume_command(
             ]
         )
     else:
-        processors.append(ConsumeCommandProcessor(is_hive=False))
+        processors.extend(
+            [
+                DockerParallelismProcessor(),
+                ConsumeCommandProcessor(is_hive=False),
+            ]
+        )
 
     return PytestCommand(
         config_file="pytest-consume.ini",

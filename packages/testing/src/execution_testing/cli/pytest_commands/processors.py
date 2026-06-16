@@ -187,3 +187,51 @@ class ConsumeCommandProcessor(ArgumentProcessor):
         if "--timing-data" in args and "-s" not in args:
             return args + ["-s"]
         return args
+
+
+class DockerParallelismProcessor(ArgumentProcessor):
+    """
+    Default ``consume direct`` to ``-n auto`` when running Docker images.
+
+    The Docker path (``--docker.client-branches``) starts one container and
+    resident shell per xdist worker, so it parallelizes near-linearly across
+    cores; defaulting to ``-n auto`` makes full use of the machine without the
+    user remembering the flag. The local ``--bin`` path is left untouched.
+
+    Nothing is added when the user already chose a worker count
+    (``-n``/``--numprocesses`` — pass ``-n 0`` to force a serial run), nor for
+    runs that collect nothing (``--collect-only``, ``--docker.build-only``),
+    where workers would only add startup cost.
+    """
+
+    def process_args(self, args: List[str]) -> List[str]:
+        """Append ``-n auto`` for a Docker run that did not request workers."""
+        if not self._uses_docker(args):
+            return args
+        if self._has_parallelism_flag(args) or self._collects_nothing(args):
+            return args
+        return args + ["-n", "auto"]
+
+    @staticmethod
+    def _uses_docker(args: List[str]) -> bool:
+        return any(
+            arg == "--docker.client-branches"
+            or arg.startswith("--docker.client-branches=")
+            for arg in args
+        )
+
+    @staticmethod
+    def _has_parallelism_flag(args: List[str]) -> bool:
+        return any(
+            arg in ("-n", "--numprocesses")
+            or arg.startswith("-n=")
+            or arg.startswith("--numprocesses=")
+            for arg in args
+        )
+
+    @staticmethod
+    def _collects_nothing(args: List[str]) -> bool:
+        return any(
+            arg in ("--collect-only", "--co", "--docker.build-only")
+            for arg in args
+        )

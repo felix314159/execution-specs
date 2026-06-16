@@ -263,6 +263,10 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: D103
                 build_results,
                 fixtures_root=config.fixtures_source.path,  # type: ignore[attr-defined]
                 dump_dir=config.getoption("base_dump_dir"),
+                # The xdist controller builds the consumers (for collection)
+                # but runs no tests, so it needs no container of its own — only
+                # the workers do the work.
+                start_backend=not _is_xdist_controller(config),
                 trace=trace,
             )
         )
@@ -341,11 +345,27 @@ def _build_docker_clients(
     )
 
 
+def _is_xdist_controller(config: pytest.Config) -> bool:
+    """
+    Return True if this is the xdist controller process (not a worker).
+
+    Under ``-n``, xdist runs a controller that distributes work plus N worker
+    processes that collect and run it. Workers carry a ``workerinput``
+    attribute; the controller does not. Without ``-n`` (``numprocesses`` unset
+    or 0) there is a single in-process runner, which is *not* a controller —
+    it runs the tests itself and does need a backend.
+    """
+    if hasattr(config, "workerinput"):
+        return False
+    return bool(getattr(config.option, "numprocesses", None))
+
+
 def _docker_fixture_consumers(
     results: List[BuildResult],
     *,
     fixtures_root: Optional[Path],
     dump_dir: Optional[Path],
+    start_backend: bool,
     trace: bool,
 ) -> List[FixtureConsumerTool]:
     """Return the fixture consumers backed by the built client images."""
@@ -356,6 +376,7 @@ def _docker_fixture_consumers(
                 result.image,
                 fixtures_root=fixtures_root,
                 dump_dir=dump_dir,
+                start_backend=start_backend,
                 trace=trace,
             )
         )

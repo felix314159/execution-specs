@@ -560,6 +560,7 @@ def fixture_consumers_from_docker_image(
     *,
     fixtures_root: Optional[Path] = None,
     dump_dir: Optional[Path] = None,
+    start_backend: bool = True,
     trace: bool = False,
 ) -> List[FixtureConsumerTool]:
     """
@@ -572,6 +573,11 @@ def fixture_consumers_from_docker_image(
     — with a resident shell each consumer dispatches its binary into. If that
     container or shell cannot be started, each consumer falls back to an
     ephemeral ``docker run`` per invocation.
+
+    ``start_backend=False`` builds the consumer objects (same classes, same
+    ids) without starting any container or shell. The xdist controller uses
+    this: it needs the consumers for collection but runs no tests itself, so
+    the per-worker containers are the only ones that do work.
     """
     if shutil.which("docker") is None:
         raise CLINotFoundInPathError(
@@ -587,8 +593,12 @@ def fixture_consumers_from_docker_image(
         )
 
     mounts = _mount_dirs(fixtures_root, dump_dir)
-    server = _session_server(
-        image, mounts, run_as_host_user=client.run_as_host_user
+    server = (
+        _session_server(
+            image, mounts, run_as_host_user=client.run_as_host_user
+        )
+        if start_backend
+        else None
     )
 
     # Every concrete consumer accepts `trace`, but the abstract base's
