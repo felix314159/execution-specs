@@ -259,7 +259,12 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: D103
                 returncode=0,
             )
         fixture_consumers.extend(
-            _docker_fixture_consumers(build_results, trace=trace)
+            _docker_fixture_consumers(
+                build_results,
+                fixtures_root=config.fixtures_source.path,  # type: ignore[attr-defined]
+                dump_dir=config.getoption("base_dump_dir"),
+                trace=trace,
+            )
         )
     if config.option.markers:
         return
@@ -337,13 +342,22 @@ def _build_docker_clients(
 
 
 def _docker_fixture_consumers(
-    results: List[BuildResult], *, trace: bool
+    results: List[BuildResult],
+    *,
+    fixtures_root: Optional[Path],
+    dump_dir: Optional[Path],
+    trace: bool,
 ) -> List[FixtureConsumerTool]:
     """Return the fixture consumers backed by the built client images."""
     consumers: List[FixtureConsumerTool] = []
     for result in results:
         consumers.extend(
-            fixture_consumers_from_docker_image(result.image, trace=trace)
+            fixture_consumers_from_docker_image(
+                result.image,
+                fixtures_root=fixtures_root,
+                dump_dir=dump_dir,
+                trace=trace,
+            )
         )
     return consumers
 

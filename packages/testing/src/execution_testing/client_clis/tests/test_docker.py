@@ -70,35 +70,99 @@ def test_fixture_consumers_from_unknown_image_raises(
         fixture_consumers_from_docker_image("some/unrelated-image:tag")
 
 
-def test_fixture_consumers_from_docker_image_builds_wrapper(
+class _FakeServer:
+    """Stand-in for `_CommandServer` that opens no real shell."""
+
+    _next_port = iter(range(40000, 41000))
+
+    def __init__(self, container_id: str) -> None:
+        self.container_id = container_id
+        self.port = next(self._next_port)
+        self.scratch = Path("/tmp/fake-eest-scratch")
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_servers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    The bridge builds one consumer per binary, each wired to an executable
-    wrapper that runs the expected in-image binary via `docker run`.
+    Pretend ``docker`` is on PATH and the session backend starts cleanly.
+
+    Records every container-start request and stubs the resident-shell command
+    server, so the bridge takes its fast path without touching a real daemon.
+    Also clears the per-process server cache so each test starts fresh.
     """
     monkeypatch.setattr(
         "execution_testing.client_clis.docker.shutil.which",
         lambda _: "/usr/bin/docker",
     )
+    monkeypatch.setattr("execution_testing.client_clis.docker._servers", {})
+    started: List[dict] = []
+
+    def fake_start(image, mounts, *, run_as_host_user):  # type: ignore
+        started.append(
+            {
+                "image": image,
+                "mounts": list(mounts),
+                "run_as_host_user": run_as_host_user,
+            }
+        )
+        return f"fakecid-{len(started)}"
+
+    monkeypatch.setattr(
+        "execution_testing.client_clis.docker._start_container", fake_start
+    )
+    monkeypatch.setattr(
+        "execution_testing.client_clis.docker._CommandServer", _FakeServer
+    )
+    monkeypatch.setattr(
+        "execution_testing.client_clis.docker.atexit.register",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "execution_testing.client_clis.docker._started_requests",
+        started,
+        raising=False,
+    )
+
+
+def _start_requests() -> List[dict]:
+    """Return the recorded container-start requests for the current test."""
+    import execution_testing.client_clis.docker as docker_mod
+
+    return docker_mod._started_requests  # type: ignore[attr-defined]
+
+
+def test_fixture_consumers_from_docker_image_builds_wrapper() -> None:
+    """
+    The bridge builds one consumer per binary, each wired to an executable
+    wrapper that dispatches the expected in-image binary into the session
+    container's resident shell.
+    """
     image = "steel/evmone:master"
     consumers = fixture_consumers_from_docker_image(image)
     assert [type(c) for c in consumers] == [
         EvmOneStateFixtureConsumer,
         EvmOneBlockchainFixtureConsumer,
     ]
+    # One session container is started for the image, shared by both consumers.
+    assert len(_start_requests()) == 1
+    # evmone writes its report to a host file, so the container runs as the
+    # host user.
+    assert _start_requests()[0]["run_as_host_user"] is True
+
     for consumer in consumers:
         wrapper = Path(str(consumer.binary))
         assert wrapper.is_file()
         assert wrapper.stat().st_mode & 0o111, "wrapper must be executable"
         script = wrapper.read_text()
-        assert "docker run" in script
-        # Fixture consumers are offline; skipping bridge setup is a large
-        # chunk of each container's startup cost.
-        assert "--network=none" in script
-        assert image in script
-        # evmone writes its report to a host file, so it runs as host user.
-        assert '--user "$(id -u):$(id -g)"' in script
+        # Fast path: the wrapper talks to the resident shell over loopback,
+        # it does not spawn its own `docker run`/`docker exec`.
+        assert "/dev/tcp/127.0.0.1/" in script
+        assert "docker run" not in script
         assert getattr(consumer, "docker_image", None) == image
 
     # The two evmone consumers point at the two distinct in-image binaries.
@@ -107,17 +171,39 @@ def test_fixture_consumers_from_docker_image_builds_wrapper(
     assert any("evmone-blockchaintest" in s for s in scripts)
 
 
-def test_docker_wrapper_no_user_flag_by_default(
+def test_docker_session_container_not_host_user_by_default() -> None:
+    """Clients writing only to stdout do not start a `--user` container."""
+    (consumer,) = fixture_consumers_from_docker_image(
+        "steel/go-ethereum:master"
+    )
+    assert _start_requests()[0]["run_as_host_user"] is False
+    script = Path(str(consumer.binary)).read_text()
+    assert "/dev/tcp/127.0.0.1/" in script
+    assert "/gethvm" in script
+
+
+def test_docker_falls_back_to_run_when_no_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clients writing only to stdout do not get a `--user` flag."""
+    """
+    If a long-lived container cannot be started, each consumer falls back to
+    an ephemeral `docker run` per invocation.
+    """
+    monkeypatch.setattr("execution_testing.client_clis.docker._servers", {})
+
+    def failing_start(image, mounts, *, run_as_host_user):  # type: ignore
+        raise RuntimeError("daemon refused detached container")
+
     monkeypatch.setattr(
-        "execution_testing.client_clis.docker.shutil.which",
-        lambda _: "/usr/bin/docker",
+        "execution_testing.client_clis.docker._start_container",
+        failing_start,
     )
     (consumer,) = fixture_consumers_from_docker_image(
         "steel/go-ethereum:master"
     )
     script = Path(str(consumer.binary)).read_text()
-    assert "--user" not in script
+    assert "docker run" in script
+    # The offline fixture consumers never need the network on the fallback
+    # path either.
+    assert "--network=none" in script
     assert "/gethvm" in script
