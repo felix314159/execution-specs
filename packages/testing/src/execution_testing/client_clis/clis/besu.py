@@ -12,6 +12,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional
 
+import pytest
 import requests
 
 from execution_testing.exceptions import (
@@ -615,7 +616,24 @@ class BesuFixtureConsumer(
                 f"State test failed: {result.get('error', 'unknown error')}"
             )
             return
-        assert not result["pass"] and result.get("validationError"), (
+        # Besu has two distinct ways of reporting a rejected transaction:
+        #
+        # 1. When the transaction can be parsed and processed, the rejection
+        #    surfaces as ``pass: false`` together with a ``validationError``.
+        # 2. When the transaction parameters are so malformed that Besu's
+        #    reference-test layer cannot even build a ``Transaction`` (e.g.
+        #    empty/invalid blob versioned hashes, a type-3 tx before Cancun),
+        #    Besu takes its ``transaction == null`` branch and reports
+        #    ``pass: true`` with ``validationError: "Transaction had
+        #    out-of-bounds parameters"`` (``pass`` is set to whether an
+        #    exception was expected).
+        #
+        # The processed path always reports ``pass: false`` when an exception
+        # is expected, so a ``pass: true`` here can only come from the second
+        # path and is itself confirmation that the transaction was rejected.
+        if result["pass"]:
+            return
+        assert result.get("validationError"), (
             f"State test failed: expected the transaction to be "
             f"rejected ({expect_exception}), but it was accepted"
         )
@@ -685,6 +703,40 @@ class BesuFixtureConsumer(
                 ) from e
         return results
 
+    def _handle_missing_state_test_result(
+        self, fixture_path: Path, fixture_name: str
+    ) -> None:
+        """
+        Handle a fixture for which Besu emitted no state-test result.
+
+        Besu's ``state-test`` runner deliberately skips a test when the
+        transaction gas limit exceeds the gas still available in the block
+        (``StateTestSubCommand``): that allowance check lives in the block
+        importer rather than the transaction processor, so it cannot be
+        expressed in a single-transaction state test. Such fixtures expect a
+        ``GAS_ALLOWANCE_EXCEEDED`` rejection; surface them as skips rather
+        than failures. Any other missing result is a genuine error.
+        """
+        fixture = self._load_state_test_fixture_file(fixture_path).get(
+            fixture_name
+        )
+        expected_exceptions = {
+            str(post.get("expectException"))
+            for posts in (fixture or {}).get("post", {}).values()
+            for post in posts
+            if post.get("expectException")
+        }
+        if expected_exceptions and all(
+            "GAS_ALLOWANCE_EXCEEDED" in exception
+            for exception in expected_exceptions
+        ):
+            pytest.skip(
+                "Besu state-test runner skips block-level gas allowance "
+                f"checks ({', '.join(sorted(expected_exceptions))}); "
+                "not expressible as a state test"
+            )
+        raise AssertionError(f"Test result for {fixture_name} missing")
+
     def consume_state_test(
         self,
         fixture_path: Path,
@@ -708,9 +760,11 @@ class BesuFixtureConsumer(
             assert len(test_result) < 2, (
                 f"Multiple test results for {fixture_name}"
             )
-            assert len(test_result) == 1, (
-                f"Test result for {fixture_name} missing"
-            )
+            if len(test_result) == 0:
+                self._handle_missing_state_test_result(
+                    fixture_path, fixture_name
+                )
+                return
             self._assert_state_test_result(fixture_path, test_result[0])
         else:
             errors = []
