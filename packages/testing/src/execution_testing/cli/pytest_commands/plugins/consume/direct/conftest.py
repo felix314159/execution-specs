@@ -263,10 +263,14 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: D103
                 build_results,
                 fixtures_root=config.fixtures_source.path,  # type: ignore[attr-defined]
                 dump_dir=config.getoption("base_dump_dir"),
-                # The xdist controller builds the consumers (for collection)
-                # but runs no tests, so it needs no container of its own — only
-                # the workers do the work.
-                start_backend=not _is_xdist_controller(config),
+                # A container is only needed where tests actually run: not on
+                # the xdist controller (it only distributes work), and not for
+                # a `--collect-only` pass (e.g. the parallelism pre-count),
+                # which never invokes a consumer.
+                start_backend=(
+                    not _is_xdist_controller(config)
+                    and not config.option.collectonly
+                ),
                 trace=trace,
             )
         )

@@ -1,18 +1,127 @@
 """CLI entry point for the `consume` pytest-based command."""
 
 import functools
+import os
 from pathlib import Path
 from typing import Any, Callable, List
 
 import click
+from rich.console import Console
 
-from .base import ArgumentProcessor, PytestCommand, common_pytest_options
+from .base import (
+    ArgumentProcessor,
+    PytestCommand,
+    PytestExecution,
+    common_pytest_options,
+)
 from .processors import (
     ConsumeCommandProcessor,
-    DockerParallelismProcessor,
     HelpFlagsProcessor,
     HiveEnvironmentProcessor,
 )
+
+# Below this many selected tests, the Docker path runs serially: starting an
+# xdist worker (and its per-worker container + resident shell) costs on the
+# order of ~15s of fixed overhead, which only pays off once there is enough
+# work to spread across the cores. Measured crossover on a 16-core machine sat
+# around ~4–5k tests (e.g. ~2k tests: ~10s serial vs ~19s parallel; ~51k
+# tests: ~240s serial vs ~70s parallel), so the threshold is set near it. The
+# decision is logged, so it stays transparent and easy to retune.
+DOCKER_SERIAL_TEST_THRESHOLD = 4000
+
+
+def uses_docker_backend(args: List[str]) -> bool:
+    """Return True if the args select the Docker client-image backend."""
+    return any(
+        arg == "--docker.client-branches"
+        or arg.startswith("--docker.client-branches=")
+        for arg in args
+    )
+
+
+def has_explicit_parallelism(args: List[str]) -> bool:
+    """Return True if the user already chose a worker count."""
+    return any(
+        arg in ("-n", "--numprocesses")
+        or arg.startswith("-n=")
+        or arg.startswith("--numprocesses=")
+        for arg in args
+    )
+
+
+def collects_no_tests(args: List[str]) -> bool:
+    """Return True for runs that never execute tests (so workers are moot)."""
+    return any(
+        arg in ("--collect-only", "--co", "--docker.build-only")
+        for arg in args
+    )
+
+
+class ConsumeDirectCommand(PytestCommand):
+    """
+    ``consume direct`` command that auto-selects xdist parallelism for Docker.
+
+    The Docker backend parallelizes near-linearly (one container + resident
+    shell per worker), but starting those workers has a fixed cost that only
+    pays off with enough tests. When the Docker backend is used and the user
+    did not pass ``-n``, this counts the selected tests with a quick in-process
+    ``--collect-only`` pass, then runs serially or with ``-n auto`` accordingly
+    — logging the count and the decision. The local ``--bin`` path and any
+    explicit ``-n`` are left untouched.
+    """
+
+    def create_executions(
+        self, pytest_args: List[str]
+    ) -> List[PytestExecution]:
+        """Build the execution(s), choosing parallelism for Docker runs."""
+        processed_args = self.process_arguments(pytest_args)
+        if (
+            uses_docker_backend(processed_args)
+            and not has_explicit_parallelism(processed_args)
+            and not collects_no_tests(processed_args)
+        ):
+            processed_args = self._with_parallelism(processed_args)
+        return [
+            PytestExecution(
+                config_file=self.config_path,
+                command_logic_test_paths=self.test_args,
+                args=processed_args,
+                allowed_exit_codes=self.allowed_exit_codes,
+            )
+        ]
+
+    def _with_parallelism(self, args: List[str]) -> List[str]:
+        """Count the selected tests and append the chosen ``-n`` setting."""
+        console = Console(stderr=True, highlight=False)
+        count = self.runner.count_selected_tests(
+            PytestExecution(
+                config_file=self.config_path,
+                command_logic_test_paths=self.test_args,
+                args=args,
+            )
+        )
+        if count is None:
+            console.print(
+                "[yellow]consume direct: could not pre-count tests; "
+                "leaving the run serial.[/yellow]"
+            )
+            return args + ["-n", "0"]
+        if count <= DOCKER_SERIAL_TEST_THRESHOLD:
+            console.print(
+                f"[bold]consume direct:[/bold] {count} tests collected "
+                f"(≤ {DOCKER_SERIAL_TEST_THRESHOLD}) → running "
+                "[bold]serially[/bold]; xdist worker startup would cost more "
+                "than it saves at this size."
+            )
+            return args + ["-n", "0"]
+        cores = os.cpu_count() or 1
+        console.print(
+            f"[bold]consume direct:[/bold] {count} tests collected "
+            f"(> {DOCKER_SERIAL_TEST_THRESHOLD}) → running in "
+            f"[bold]parallel[/bold] with `-n auto` (up to {cores} workers) to "
+            "use all cores."
+        )
+        return args + ["-n", "auto"]
 
 
 def create_consume_command(
@@ -32,14 +141,14 @@ def create_consume_command(
             ]
         )
     else:
-        processors.extend(
-            [
-                DockerParallelismProcessor(),
-                ConsumeCommandProcessor(is_hive=False),
-            ]
-        )
+        processors.append(ConsumeCommandProcessor(is_hive=False))
 
-    return PytestCommand(
+    # `consume direct` auto-selects parallelism for the Docker backend; other
+    # non-hive entry points (e.g. `cache`) keep the plain command.
+    command_class = (
+        ConsumeDirectCommand if command_name == "direct" else PytestCommand
+    )
+    return command_class(
         config_file="pytest-consume.ini",
         argument_processors=processors,
         command_logic_test_paths=command_logic_test_paths,

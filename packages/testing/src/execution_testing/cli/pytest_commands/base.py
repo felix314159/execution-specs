@@ -1,8 +1,10 @@
 """Base classes and utilities for pytest-based CLI commands."""
 
+import io
 import os
 import sys
 from abc import ABC, abstractmethod
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from os.path import realpath
 from pathlib import Path
@@ -67,12 +69,11 @@ class PytestRunner:
     `fill --help` subprocess in `docs/scripts/generate_fill_help.py`.
     """
 
-    def run_single(self, execution: PytestExecution) -> int:
-        """Run pytest once with the given configuration and arguments."""
-        root_dir_arg = ["--rootdir", "."]
+    def _build_pytest_args(self, execution: PytestExecution) -> List[str]:
+        """Assemble the full ``pytest`` argument list for an execution."""
         pytest_args = (
             ["-c", str(execution.config_file)]
-            + root_dir_arg
+            + ["--rootdir", "."]
             + [
                 str(PACKAGE_INSTALL_FOLDER / test_path)
                 for test_path in execution.command_logic_test_paths
@@ -85,6 +86,11 @@ class PytestRunner:
                 "execution_testing.cli."
                 "pytest_commands.plugins.fix_package_test_path",
             ]
+        return pytest_args
+
+    def run_single(self, execution: PytestExecution) -> int:
+        """Run pytest once with the given configuration and arguments."""
+        pytest_args = self._build_pytest_args(execution)
         if self._is_verbose(execution.args) or "CI" in os.environ:
             pytest_cmd = f"pytest {' '.join(pytest_args)}"
             self.error_console.print(f"Executing: [bold]{pytest_cmd}[/bold]")
@@ -96,6 +102,40 @@ class PytestRunner:
                     )
 
         return pytest.main(pytest_args)
+
+    def count_selected_tests(
+        self, execution: PytestExecution
+    ) -> Optional[int]:
+        """
+        Return how many tests ``execution`` would select, or None on failure.
+
+        Runs a quiet, in-process ``--collect-only`` with a plugin that records
+        ``len(session.items)`` once collection finishes (after ``-k``/``-m``
+        and any plugin deselection, so it is the number that would actually
+        run). Being in-process, it pays only collection time, not a second
+        interpreter startup. xdist is left registered but, with no ``-n`` in
+        these args, spawns no workers — and some project plugins declare xdist
+        hooks, so disabling it outright breaks collection. Output is suppressed
+        so only the caller's own decision message reaches the terminal.
+        """
+
+        class _Counter:
+            count: Optional[int] = None
+
+            def pytest_collection_finish(
+                self, session: pytest.Session
+            ) -> None:
+                self.count = len(session.items)
+
+        counter = _Counter()
+        args = self._build_pytest_args(execution) + ["--collect-only", "-q"]
+        sink = io.StringIO()
+        try:
+            with redirect_stdout(sink), redirect_stderr(sink):
+                pytest.main(args, plugins=[counter])
+        except Exception:
+            return None
+        return counter.count
 
     def _is_verbose(self, args: List[str]) -> bool:
         """Check if verbose output is requested."""
