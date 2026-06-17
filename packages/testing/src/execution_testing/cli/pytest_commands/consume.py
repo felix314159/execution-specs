@@ -144,6 +144,12 @@ class ConsumeDirectCommand(PytestCommand):
     ) -> List[str]:
         """Count the selected tests and append the chosen ``-n`` setting."""
         console = Console(stderr=True, highlight=False)
+        console.print(
+            "[bold]consume direct:[/bold] counting selected tests to choose "
+            "serial vs. parallel execution (no image is built for this "
+            "step). The Docker client image build runs next, with its plan "
+            "and progress shown, once the test run starts."
+        )
         count = self.runner.count_selected_tests(
             PytestExecution(
                 config_file=self.config_path,

@@ -551,6 +551,66 @@ def build_clients(
     ]
 
 
+def planned_client_images(
+    clients_file: Path,
+    *,
+    clients: Optional[Sequence[str]] = None,
+) -> List[BuildResult]:
+    """
+    Resolve each targeted client's image *name* without building anything.
+
+    A ``--collect-only`` run (e.g. ``consume direct``'s parallelism pre-count)
+    only needs the fixture-consumer objects to count and parametrize tests, and
+    those are derived from the image *name* alone (``docker``'s
+    ``fixture_consumers_from_docker_image`` with ``start_backend=False`` never
+    inspects or requires a built image and never invokes a consumer). Skipping
+    the ``git ls-remote`` freshness check and the ``docker buildx`` build keeps
+    that pass fast and silent, and leaves the actual (possibly minutes-long)
+    build to the real run, where its progress is shown to the user rather than
+    swallowed by the quiet pre-count.
+
+    ``clients`` restricts the result to a subset of the config. Only clients
+    with a matching ``Dockerfile`` are included, as in :func:`build_clients`
+    (which is what the real run uses). The returned results carry the image
+    name only; their ``sha``/``commit_datetime`` are left empty because no
+    build or upstream lookup is performed here.
+    """
+    specs = load_client_specs(clients_file)
+    wanted = set(clients) if clients is not None else None
+    if wanted is not None:
+        missing = wanted - {spec.client for spec in specs}
+        if missing:
+            raise DockerBuildError(
+                f"client(s) {sorted(missing)} not found in {clients_file}"
+            )
+
+    results: List[BuildResult] = []
+    for spec in specs:
+        if wanted is not None and spec.client not in wanted:
+            continue
+        dockerfile = DOCKER_DIR / f"Dockerfile.{spec.client}"
+        if not dockerfile.is_file():
+            if wanted is not None:
+                raise DockerBuildError(
+                    f"no Dockerfile for client '{spec.client}' "
+                    f"(expected {dockerfile})"
+                )
+            continue
+        image = f"{IMAGE_PREFIX}/{spec.client}:{sanitize_docker_tag(spec.tag)}"
+        results.append(
+            BuildResult(
+                client=spec.client,
+                image=image,
+                github=spec.github,
+                tag=spec.tag,
+                sha="",
+                reused=True,
+                commit_datetime=None,
+            )
+        )
+    return results
+
+
 def _plan_build(
     spec: ClientSpec, dockerfile: Path, *, force: bool
 ) -> BuildPlan:

@@ -23,6 +23,7 @@ from execution_testing.client_clis.clis.docker import (
     build_clients,
     build_summary,
     load_client_specs,
+    planned_client_images,
 )
 from execution_testing.client_clis.clis.evmone import (
     EvmoneFixtureConsumerCommon,
@@ -249,7 +250,18 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: D103
                 f"Docker client image build failed: {exc}",
                 returncode=pytest.ExitCode.INTERNAL_ERROR,
             )
-        logger.info("\n" + build_summary(build_results))
+        if config.option.collectonly and not docker_build_only:
+            # A collect-only pass (e.g. the parallelism pre-count) resolved
+            # image names only, building nothing — so report that rather than a
+            # build summary whose every row would misleadingly read "reused".
+            logger.info(
+                "collect-only: not building client image(s); counting "
+                f"against {len(build_results)} planned image(s) "
+                f"({', '.join(r.client for r in build_results)}). The actual "
+                "build runs (with progress shown) on the real test run."
+            )
+        else:
+            logger.info("\n" + build_summary(build_results))
         if docker_build_only:
             plural = "s" if len(build_results) != 1 else ""
             pytest.exit(
@@ -339,6 +351,13 @@ def _build_docker_clients(
             "`--docker.buildjobs` must be a positive integer "
             f"(got {build_jobs}); omit it to use each build tool's default."
         )
+
+    # A plain `--collect-only` run (e.g. the parallelism pre-count) only needs
+    # the consumer objects to count tests, and those derive from the image name
+    # alone — so resolve names without building. `--docker.build-only` is the
+    # exception: it exists to build, even though it collects no tests.
+    if config.option.collectonly and not config.getoption("docker_build_only"):
+        return planned_client_images(clients_file, clients=consumable)
 
     return build_clients(
         clients_file,

@@ -115,8 +115,17 @@ class PytestRunner:
         run). Being in-process, it pays only collection time, not a second
         interpreter startup. xdist is left registered but, with no ``-n`` in
         these args, spawns no workers — and some project plugins declare xdist
-        hooks, so disabling it outright breaks collection. Output is suppressed
-        so only the caller's own decision message reaches the terminal.
+        hooks, so disabling it outright breaks collection.
+
+        This pass is deliberately kept fast and silent. The Docker-backed
+        consume plugin recognizes a ``--collect-only`` run and resolves only
+        the client image *names* (enough to enumerate the fixture consumers and
+        count, since a consumer is never invoked during collection) without
+        building anything — so the slow, must-be-visible ``docker buildx``
+        build is left to the real run, where its progress is streamed to the
+        user instead of being swallowed here. Output is therefore suppressed so
+        only the caller's own decision message reaches the terminal, not
+        pytest's per-test collection listing.
         """
 
         class _Counter:

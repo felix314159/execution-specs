@@ -13,6 +13,7 @@ from execution_testing.client_clis.clis.docker.builder import (
     DockerBuildError,
     build_clients,
     load_client_specs,
+    planned_client_images,
     sanitize_docker_tag,
 )
 
@@ -150,6 +151,45 @@ def test_nocache_new_commit_rebuilds(
     assert results[0].sha == LATEST_SHA
     assert len(stub.builds) == 1
     assert "--no-cache" in stub.builds[0]
+
+
+def test_planned_images_build_nothing(
+    monkeypatch: pytest.MonkeyPatch, stub: Stub
+) -> None:
+    """
+    `planned_client_images` resolves the image name only.
+
+    The collect-only pre-count relies on this: it must never issue a build or
+    consult upstream, even when an image is missing (the case that would
+    otherwise force a from-scratch build).
+    """
+    monkeypatch.setattr(builder, "_image_label", lambda *_: None)
+    results = planned_client_images(
+        BUNDLED_CLIENTS_FILE, clients=["go-ethereum"]
+    )
+    assert [r.image for r in results] == ["steel/go-ethereum:master"]
+    assert results[0].sha == ""
+    assert results[0].commit_datetime is None
+    # The whole point: no build issued and no upstream lookup, ever.
+    assert stub.builds == []
+    assert stub.resolves == []
+
+
+def test_planned_images_subset_and_order() -> None:
+    """A subset is honored and the config's order is preserved."""
+    results = planned_client_images(
+        BUNDLED_CLIENTS_FILE, clients=["besu", "go-ethereum"]
+    )
+    names = [r.client for r in results]
+    assert set(names) == {"besu", "go-ethereum"}
+    specs = [s.client for s in load_client_specs(BUNDLED_CLIENTS_FILE)]
+    assert names == [n for n in specs if n in {"besu", "go-ethereum"}]
+
+
+def test_planned_images_unknown_client_raises() -> None:
+    """An unknown client name is rejected, as in `build_clients`."""
+    with pytest.raises(DockerBuildError, match="not found"):
+        planned_client_images(BUNDLED_CLIENTS_FILE, clients=["nope"])
 
 
 COMMIT_DT = datetime(2026, 6, 11, 21, 11, tzinfo=timezone.utc)

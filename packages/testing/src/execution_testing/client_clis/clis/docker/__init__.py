@@ -13,6 +13,7 @@ from .builder import (
     build_clients,
     build_summary,
     load_client_specs,
+    planned_client_images,
     sanitize_docker_tag,
 )
 
@@ -23,5 +24,6 @@ __all__ = (
     "build_clients",
     "build_summary",
     "load_client_specs",
+    "planned_client_images",
     "sanitize_docker_tag",
 )
