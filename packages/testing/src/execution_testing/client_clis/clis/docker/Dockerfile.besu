@@ -29,3 +29,13 @@ RUN apt-get update -q && apt-get install -qy --no-install-recommends openjdk-25-
 COPY --from=builder /out/evmtool /evmtool
 RUN ln -s /evmtool/bin/evmtool /besu-vm
 ENV BESU_BIN=/evmtool/bin/evmtool
+
+# Keep the JVM's PerfData counters in private memory instead of writing them
+# to /tmp/hsperfdata_<user>/<pid>. The consume-direct Docker bridge bind-mounts
+# the host /tmp into every per-worker container at the same path, and each
+# container has its own PID namespace, so evmtool JVMs in different containers
+# collide on the same /tmp/hsperfdata_root/<pid> file. The JVM that loses the
+# lock prints a `[warning][perf,memops] Cannot use file ... locked by another
+# process` line to stdout, which corrupts evmtool's NDJSON output and makes the
+# consumer's json.loads fail. Disabling the shared-memory perf file removes it.
+ENV EVMTOOL_OPTS=-XX:+PerfDisableSharedMem

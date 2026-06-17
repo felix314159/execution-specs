@@ -3,7 +3,7 @@
 import functools
 import os
 from pathlib import Path
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Optional
 
 import click
 from rich.console import Console
@@ -29,6 +29,15 @@ from .processors import (
 # decision is logged, so it stays transparent and easy to retune.
 DOCKER_SERIAL_TEST_THRESHOLD = 4000
 
+# Besu's `evmtool` is a JVM that loads the entire Besu node (~200 jars) on the
+# classpath, so every fixture-file invocation pays a heavy, CPU-bound cold
+# start. Running one such JVM per core saturates the machine and inflates wall
+# time without improving throughput past a handful of concurrent JVMs — and
+# the extra contention is what surfaces flaky startup races. Besu-only runs are
+# therefore capped to this many xdist workers, however many cores are
+# available. The cap is logged so it is visible to the user.
+BESU_MAX_WORKERS = 4
+
 
 def uses_docker_backend(args: List[str]) -> bool:
     """Return True if the args select the Docker client-image backend."""
@@ -37,6 +46,39 @@ def uses_docker_backend(args: List[str]) -> bool:
         or arg.startswith("--docker.client-branches=")
         for arg in args
     )
+
+
+def selected_docker_clients(args: List[str]) -> Optional[List[str]]:
+    """
+    Return the lower-cased client names from ``--docker.client``, or None.
+
+    None means the option was not given (so the run uses every client in the
+    ``clients.yaml``); a list gives the explicitly selected subset.
+    """
+    value: Optional[str] = None
+    for i, arg in enumerate(args):
+        if arg == "--docker.client" and i + 1 < len(args):
+            value = args[i + 1]
+            break
+        if arg.startswith("--docker.client="):
+            value = arg.split("=", 1)[1]
+            break
+    if value is None:
+        return None
+    return [name.strip().lower() for name in value.split(",") if name.strip()]
+
+
+def runs_besu_only(args: List[str]) -> bool:
+    """
+    Return True if this is a Docker run whose only selected client is Besu.
+
+    The worker cap is applied only when Besu is the sole client: in a mixed
+    run the xdist workers are shared across clients, so throttling them all
+    because Besu is present would needlessly slow the native clients.
+    """
+    return uses_docker_backend(args) and selected_docker_clients(args) == [
+        "besu"
+    ]
 
 
 def has_explicit_parallelism(args: List[str]) -> bool:
@@ -75,12 +117,19 @@ class ConsumeDirectCommand(PytestCommand):
     ) -> List[PytestExecution]:
         """Build the execution(s), choosing parallelism for Docker runs."""
         processed_args = self.process_arguments(pytest_args)
-        if (
-            uses_docker_backend(processed_args)
-            and not has_explicit_parallelism(processed_args)
-            and not collects_no_tests(processed_args)
+        besu_only = runs_besu_only(processed_args)
+        if uses_docker_backend(processed_args) and not collects_no_tests(
+            processed_args
         ):
-            processed_args = self._with_parallelism(processed_args)
+            if has_explicit_parallelism(processed_args):
+                # The auto-decision is skipped, but a Besu cap is still
+                # enforced against an explicit `-n` that exceeds it.
+                if besu_only:
+                    processed_args = self._cap_besu_parallelism(processed_args)
+            else:
+                processed_args = self._with_parallelism(
+                    processed_args, besu_only=besu_only
+                )
         return [
             PytestExecution(
                 config_file=self.config_path,
@@ -90,7 +139,9 @@ class ConsumeDirectCommand(PytestCommand):
             )
         ]
 
-    def _with_parallelism(self, args: List[str]) -> List[str]:
+    def _with_parallelism(
+        self, args: List[str], besu_only: bool = False
+    ) -> List[str]:
         """Count the selected tests and append the chosen ``-n`` setting."""
         console = Console(stderr=True, highlight=False)
         count = self.runner.count_selected_tests(
@@ -115,6 +166,18 @@ class ConsumeDirectCommand(PytestCommand):
             )
             return args + ["-n", "0"]
         cores = os.cpu_count() or 1
+        if besu_only:
+            workers = min(BESU_MAX_WORKERS, cores)
+            console.print(
+                f"[bold]consume direct:[/bold] {count} tests collected "
+                f"(> {DOCKER_SERIAL_TEST_THRESHOLD}) → running in "
+                f"[bold]parallel[/bold] with [bold]-n {workers}[/bold] "
+                f"(of {cores} cores). [yellow]Besu is capped to "
+                f"{BESU_MAX_WORKERS} workers[/yellow]: its evmtool is a JVM "
+                "loading the full Besu node per invocation, so more "
+                "concurrent JVMs saturate CPU without throughput gain."
+            )
+            return args + ["-n", str(workers)]
         console.print(
             f"[bold]consume direct:[/bold] {count} tests collected "
             f"(> {DOCKER_SERIAL_TEST_THRESHOLD}) → running in "
@@ -122,6 +185,52 @@ class ConsumeDirectCommand(PytestCommand):
             "use all cores."
         )
         return args + ["-n", "auto"]
+
+    def _cap_besu_parallelism(self, args: List[str]) -> List[str]:
+        """
+        Clamp an explicit ``-n``/``--numprocesses`` to the Besu worker cap.
+
+        Honors the user's explicit request when it is already at or below the
+        cap (including ``-n 0`` for a serial run); only an over-cap value, or
+        ``auto``/``logical``, is reduced — and the reduction is logged.
+        """
+        cores = os.cpu_count() or 1
+        cap = min(BESU_MAX_WORKERS, cores)
+
+        def clamped(value: str) -> Optional[str]:
+            if value in ("auto", "logical"):
+                return str(cap)
+            try:
+                requested = int(value)
+            except ValueError:
+                return None
+            return str(cap) if requested > cap else None
+
+        out = list(args)
+        capped_from: Optional[str] = None
+        for i, arg in enumerate(out):
+            if arg in ("-n", "--numprocesses") and i + 1 < len(out):
+                new_value = clamped(out[i + 1])
+                if new_value is not None:
+                    capped_from, out[i + 1] = out[i + 1], new_value
+                break
+            if arg.startswith("-n=") or arg.startswith("--numprocesses="):
+                prefix, _, value = arg.partition("=")
+                new_value = clamped(value)
+                if new_value is not None:
+                    capped_from = value
+                    out[i] = f"{prefix}={new_value}"
+                break
+        if capped_from is not None:
+            Console(stderr=True, highlight=False).print(
+                f"[bold]consume direct:[/bold] [yellow]Besu is capped to "
+                f"{cap} workers[/yellow] (of {cores} cores): reducing the "
+                f"requested `-n {capped_from}` to [bold]-n {cap}[/bold]. "
+                "Besu's evmtool is a JVM loading the full Besu node per "
+                "invocation, so more concurrent JVMs saturate CPU without "
+                "throughput gain."
+            )
+        return out
 
 
 def create_consume_command(
