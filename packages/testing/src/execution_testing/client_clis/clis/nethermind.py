@@ -187,6 +187,29 @@ class NethtestFixtureConsumer(
             )
         return result_json, result.stderr
 
+    @staticmethod
+    def _nethtest_state_test_name(fixture_name: str) -> str:
+        """
+        Reproduce the name `nethtest` derives from a state test fixture id.
+
+        `nethtest` builds the per-result `name` from the fixture id by
+        first taking the path basename (the substring after the last `/`)
+        and then, if that still contains `.py::`, the substring after it.
+        This drops the directory and module-file prefix while keeping any
+        pytest class segment (`Class::method`).
+
+        Mirroring this derivation here (rather than naively stripping the
+        module path with `rsplit("::")`) lets us match results both for
+        tests grouped under a class and for tests whose parametrization id
+        itself contains a `/` (e.g. the EIP-7951 wycheproof vectors, which
+        reference files like `wycheproof/...test.json`) — `nethtest` names
+        both differently from the bare post-`::` name.
+        """
+        name = fixture_name.rsplit("/", maxsplit=1)[-1]
+        if ".py::" in name:
+            name = name.split(".py::", maxsplit=1)[-1]
+        return name
+
     def consume_state_test(
         self,
         command: Tuple[str, ...],
@@ -209,7 +232,7 @@ class NethtestFixtureConsumer(
         if fixture_name:
             # TODO: this check is too fragile; extend for ethereum/tests?
             nethtest_suffix = "_d0g0v0_"
-            short_fixture_name = fixture_name.rsplit("::", maxsplit=1)[-1]
+            short_fixture_name = self._nethtest_state_test_name(fixture_name)
             assert all(
                 test_result["name"].endswith(nethtest_suffix)
                 for test_result in file_results
