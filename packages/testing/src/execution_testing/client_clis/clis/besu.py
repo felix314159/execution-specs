@@ -10,7 +10,7 @@ import tempfile
 import textwrap
 from functools import cache
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Set
 
 import pytest
 import requests
@@ -58,11 +58,22 @@ class BesuEvmTool(EthereumCLI):
         self.binary = binary if binary else self.default_binary
         self.trace = trace
 
-    def _run_command(self, command: List[str]) -> subprocess.CompletedProcess:
-        """Run a command and return the result."""
+    def _run_command(
+        self, command: List[str], stdin_input: Optional[str] = None
+    ) -> subprocess.CompletedProcess:
+        """
+        Run a command and return the result.
+
+        ``stdin_input`` is fed to the process' standard input; Besu's
+        ``state-test``/``block-test`` read newline-separated fixture file
+        paths from stdin when given no positional arguments, which lets a
+        single JVM process consume an arbitrary number of files without
+        hitting the command line length limit.
+        """
         try:
             return subprocess.run(
                 command,
+                input=stdin_input,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -484,7 +495,157 @@ class BesuFixtureConsumer(
     FixtureConsumerTool,
     fixture_formats=[StateFixture, BlockchainFixture],
 ):
-    """Besu's implementation of the fixture consumer."""
+    """
+    Besu's implementation of the fixture consumer.
+
+    Besu's ``evmtool`` pays a large fixed JVM/initialization cost (~2.5s:
+    loading the KZG trusted setup, building the reference-test protocol
+    schedules, ...) on every process launch, while the marginal cost of an
+    extra test within an already-running process is small. Invoking the tool
+    once per fixture file (or, worse, once per test) therefore makes Besu
+    orders of magnitude slower than clients with negligible startup cost.
+
+    To avoid this, fixtures are consumed in *batches*: a single ``state-test``
+    or ``block-test`` process is given many fixture files at once (their paths
+    fed via stdin so the command line length limit is never hit) and the
+    per-test results are cached. The consume-direct plugin assigns each fixture
+    file to a batch *group* and pins all of a group's tests to the same xdist
+    worker (``--dist loadgroup``); the first test of a group to run triggers
+    the batch for the whole group, and every other test in it is then a cache
+    lookup. Each test is fully isolated inside the Besu process (state-test
+    copies the initial world state per spec; block-test builds a fresh
+    blockchain per test), so batching does not leak state between tests.
+    """
+
+    batch_capable: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        binary: Optional[Path] = None,
+        trace: bool = False,
+    ):
+        """Initialize the Besu fixture consumer and its batch state."""
+        super().__init__(binary=binary, trace=trace)
+        # group name -> fixture files assigned to it, per format.
+        self._state_group_files: Dict[str, List[Path]] = {}
+        self._blockchain_group_files: Dict[str, List[Path]] = {}
+        # absolute fixture path -> its batch group name.
+        self._file_group: Dict[Path, str] = {}
+        # groups whose batch has already been executed, per format.
+        self._state_batched_groups: Set[str] = set()
+        self._blockchain_batched_groups: Set[str] = set()
+        # cached results, accumulated across batched groups.
+        self._state_results: Dict[str, List[Dict[str, Any]]] = {}
+        self._blockchain_ran: Set[str] = set()
+        self._blockchain_failed: Dict[str, str] = {}
+
+    def register_batch_group(
+        self,
+        group: str,
+        fixture_format: FixtureFormat,
+        fixture_path: Path,
+    ) -> None:
+        """
+        Assign a fixture file to a batch group.
+
+        Called by the consume-direct plugin during collection for every
+        selected fixture file, so that when the first test of ``group`` runs
+        the consumer knows the full set of files to batch in one process.
+        """
+        fixture_path = Path(fixture_path)
+        self._file_group[fixture_path] = group
+        if fixture_format == StateFixture:
+            self._state_group_files.setdefault(group, [])
+            if fixture_path not in self._state_group_files[group]:
+                self._state_group_files[group].append(fixture_path)
+        elif fixture_format == BlockchainFixture:
+            self._blockchain_group_files.setdefault(group, [])
+            if fixture_path not in self._blockchain_group_files[group]:
+                self._blockchain_group_files[group].append(fixture_path)
+
+    @property
+    def _batching_enabled(self) -> bool:
+        """True if any fixture files have been registered for batching."""
+        return bool(self._file_group)
+
+    def _run_batch(
+        self, subcommand: str, files: List[Path]
+    ) -> subprocess.CompletedProcess:
+        """
+        Run ``evmtool <subcommand>`` over many fixture files in one process.
+
+        File paths are fed via stdin (one per line); Besu reads them when no
+        positional file arguments are given, avoiding the command line length
+        limit for very large batches.
+        """
+        command = [str(self.binary), subcommand]
+        stdin_input = "".join(f"{path}\n" for path in files)
+        result = self._run_command(command, stdin_input=stdin_input)
+        if result.returncode != 0:
+            raise Exception(
+                f"Unexpected exit code running batched {subcommand}:\n"
+                f"{' '.join(command)} (over {len(files)} files)\n\n"
+                f"Error:\n{result.stderr}"
+            )
+        for load_error in ("File content error", "File not found"):
+            if load_error in result.stdout:
+                raise Exception(
+                    f"Besu could not load a fixture in the batch "
+                    f"({load_error}):\n{result.stdout}\n{result.stderr}"
+                )
+        return result
+
+    def _ensure_state_group_batched(self, fixture_path: Path) -> None:
+        """Run (once) the state-test batch for ``fixture_path``'s group."""
+        group = self._file_group[Path(fixture_path)]
+        if group in self._state_batched_groups:
+            return
+        files = self._state_group_files.get(group, [])
+        result = self._run_batch("state-test", files)
+        for line in result.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise Exception(
+                    f"Failed to parse Besu state-test output as JSON.\n"
+                    f"Offending line:\n{line}\n\nError: {e}"
+                ) from e
+            if "test" in entry and "name" not in entry:
+                entry["name"] = entry["test"]
+            self._state_results.setdefault(entry["name"], []).append(entry)
+        self._state_batched_groups.add(group)
+
+    def _ensure_blockchain_group_batched(self, fixture_path: Path) -> None:
+        """Run (once) the block-test batch for ``fixture_path``'s group."""
+        group = self._file_group[Path(fixture_path)]
+        if group in self._blockchain_batched_groups:
+            return
+        files = self._blockchain_group_files.get(group, [])
+        result = self._run_batch("block-test", files)
+        in_failures = False
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if in_failures:
+                # The failure list ends at the trailing "===" separator.
+                if line.startswith("="):
+                    in_failures = False
+                    continue
+                if line.startswith("- "):
+                    name, _, reason = line[2:].partition(": ")
+                    self._blockchain_failed[name] = reason
+                continue
+            if line == "Failed tests:":
+                in_failures = True
+            elif line.startswith("Running iteration"):
+                continue
+            elif line.startswith("Running "):
+                self._blockchain_ran.add(line[len("Running ") :])
+        self._blockchain_batched_groups.add(group)
 
     def consume_blockchain_test(
         self,
@@ -495,9 +656,26 @@ class BesuFixtureConsumer(
         """
         Consume a single blockchain test.
 
-        Besu's ``evmtool block-test`` accepts ``--test-name`` to
-        select a specific fixture from the file.
+        When batching is active (the normal consume-direct path), the result
+        comes from a single ``block-test`` process shared by the fixture's
+        whole batch group. Otherwise Besu's ``evmtool block-test`` is invoked
+        for this file alone, using ``--test-name`` to select the fixture.
         """
+        if self._batching_enabled and debug_output_path is None:
+            assert fixture_name, "batched blockchain tests require a name"
+            self._ensure_blockchain_group_batched(fixture_path)
+            if fixture_name in self._blockchain_failed:
+                raise Exception(
+                    f"Blockchain test failed: {fixture_name}: "
+                    f"{self._blockchain_failed[fixture_name]}"
+                )
+            if fixture_name not in self._blockchain_ran:
+                raise AssertionError(
+                    f"Besu ran no blockchain test for {fixture_name} "
+                    f"(vacuous pass)"
+                )
+            return
+
         subcommand = "block-test"
         subcommand_options: List[str] = []
         if debug_output_path:
@@ -746,9 +924,26 @@ class BesuFixtureConsumer(
         """
         Consume a single state test.
 
-        Uses the cached result from ``consume_state_test_file``
-        and selects the requested fixture by name.
+        When batching is active (the normal consume-direct path), the result
+        comes from a single ``state-test`` process shared by the fixture's
+        whole batch group. Otherwise (e.g. when dumping debug output) the file
+        is run on its own via ``consume_state_test_file``.
         """
+        if self._batching_enabled and debug_output_path is None:
+            self._ensure_state_group_batched(fixture_path)
+            assert fixture_name, "batched state tests require a fixture name"
+            test_result = self._state_results.get(fixture_name, [])
+            assert len(test_result) < 2, (
+                f"Multiple test results for {fixture_name}"
+            )
+            if len(test_result) == 0:
+                self._handle_missing_state_test_result(
+                    fixture_path, fixture_name
+                )
+                return
+            self._assert_state_test_result(fixture_path, test_result[0])
+            return
+
         file_results = self.consume_state_test_file(
             fixture_path=fixture_path,
             debug_output_path=debug_output_path,

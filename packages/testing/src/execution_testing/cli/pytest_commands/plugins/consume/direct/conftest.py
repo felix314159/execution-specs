@@ -6,10 +6,12 @@ For example, via go-ethereum's `evm blocktest` or `evm statetest` commands.
 """
 
 import json
+import os
 import tempfile
 import warnings
+import zlib
 from pathlib import Path
-from typing import Any, Generator, List, Optional
+from typing import Any, Generator, List, Optional, Tuple
 
 import pytest
 
@@ -368,6 +370,68 @@ def _build_docker_clients(
     )
 
 
+# Minimum number of tests a batch group should contain before it is worth
+# splitting work onto another worker. Each group costs one expensive client
+# process launch (e.g. ~2.5s for a Besu JVM), so tiny runs are collapsed into
+# few groups (avoiding many concurrent JVMs thrashing the CPU) while large
+# runs fan out across every worker, where the fixed cost is amortized by the
+# per-test execution that dominates.
+_TARGET_TESTS_PER_BATCH_GROUP = 64
+
+
+def _max_batch_groups(config: pytest.Config) -> int:
+    """
+    Upper bound on batch groups: the xdist worker count.
+
+    Each group is run in a single client process and pinned to one worker, so
+    there is no point having more groups than workers. Must be identical on the
+    controller and on every worker so the group assignment (and therefore the
+    ``xdist_group`` markers) agree. Falls back to a single group when not
+    running under xdist, so a plain (``-n0``) run batches everything in one
+    process.
+    """
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput and workerinput.get("workercount"):
+        return max(1, int(workerinput["workercount"]))
+    numprocesses = getattr(config.option, "numprocesses", None)
+    if isinstance(numprocesses, int) and numprocesses > 0:
+        return numprocesses
+    if numprocesses in (None, 0):
+        # No xdist: a single in-process runner, so one group is optimal.
+        return 1
+    # `-n auto`/`logical` not yet resolved to an int: mirror xdist's choice.
+    return max(1, os.cpu_count() or 1)
+
+
+def _batch_bucket_count(config: pytest.Config, batch_item_count: int) -> int:
+    """
+    Number of batch groups for ``batch_item_count`` batch-capable test items.
+
+    Caps the number of groups at the worker count and ensures each group holds
+    roughly ``_TARGET_TESTS_PER_BATCH_GROUP`` tests, so small runs use few
+    client process launches and large runs spread across all workers. Derived
+    purely from values identical on the controller and every worker
+    (``batch_item_count`` is the full collection; the cap is the worker count),
+    so all processes compute the same group assignment.
+    """
+    groups_worth_splitting = max(
+        1, -(-batch_item_count // _TARGET_TESTS_PER_BATCH_GROUP)
+    )
+    return min(_max_batch_groups(config), groups_worth_splitting)
+
+
+def _batch_group_name(json_path: Path, bucket_count: int) -> str:
+    """
+    Deterministically map a fixture file to one of ``bucket_count`` groups.
+
+    Uses ``zlib.crc32`` rather than the built-in ``hash`` because the latter
+    is salted per-process (``PYTHONHASHSEED``) and would assign the same file
+    to different groups on different xdist workers.
+    """
+    bucket = zlib.crc32(str(json_path).encode()) % bucket_count
+    return f"besu-batch-{bucket}"
+
+
 def _is_xdist_controller(config: pytest.Config) -> bool:
     """
     Return True if this is the xdist controller process (not a worker).
@@ -475,6 +539,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     )
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: List[pytest.Item]
 ) -> None:
@@ -491,9 +556,19 @@ def pytest_collection_modifyitems(
     Additionally, xfail consumer/test-case pairs whose fork the consumer's
     client does not yet implement (e.g. evmone on Amsterdam), so the known
     gap is tracked rather than reported as a spurious failure.
+
+    Finally, for consumers that pay a large per-process startup cost (Besu),
+    assign each selected fixture file to a batch group and tag its items with
+    a matching ``xdist_group`` marker. Under ``--dist loadgroup`` this pins a
+    whole group to one worker, where the consumer runs every file in the group
+    in a single client process (see ``BesuFixtureConsumer``).
     """
+    fixtures_root = getattr(config, "fixtures_source", None)
+    fixtures_path = fixtures_root.path if fixtures_root is not None else None
+
     selected = []
     deselected = []
+    batchable: List[Tuple[pytest.Item, Any, TestCaseIndexFile]] = []
     for item in items:
         callspec = getattr(item, "callspec", None)
         params = callspec.params if callspec is not None else {}
@@ -507,6 +582,12 @@ def pytest_collection_modifyitems(
             deselected.append(item)
             continue
         selected.append(item)
+        if (
+            getattr(fixture_consumer, "batch_capable", False)
+            and isinstance(test_case, TestCaseIndexFile)
+            and fixtures_path is not None
+        ):
+            batchable.append((item, fixture_consumer, test_case))
         if (
             isinstance(fixture_consumer, EvmoneFixtureConsumerCommon)
             and test_case is not None
@@ -524,3 +605,20 @@ def pytest_collection_modifyitems(
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = selected
+
+    # Assign each batch-capable item to a batch group (one client process,
+    # pinned to one worker under `--dist loadgroup`). The number of groups is
+    # derived from the batch item count, which is identical across the
+    # controller and every worker, so the `xdist_group` markers agree.
+    if batchable:
+        # `batchable` is only populated when `fixtures_path` is known.
+        assert fixtures_path is not None
+        bucket_count = _batch_bucket_count(config, len(batchable))
+        for item, fixture_consumer, test_case in batchable:
+            group = _batch_group_name(test_case.json_path, bucket_count)
+            item.add_marker(pytest.mark.xdist_group(group))
+            fixture_consumer.register_batch_group(
+                group,
+                test_case.format,
+                fixtures_path / test_case.json_path,
+            )

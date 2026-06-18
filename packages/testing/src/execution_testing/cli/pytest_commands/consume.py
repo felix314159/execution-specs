@@ -91,6 +91,38 @@ def has_explicit_parallelism(args: List[str]) -> bool:
     )
 
 
+def parallelism_value(args: List[str]) -> Optional[str]:
+    """Return the ``-n``/``--numprocesses`` value, or None if not given."""
+    for i, arg in enumerate(args):
+        if arg in ("-n", "--numprocesses") and i + 1 < len(args):
+            return args[i + 1]
+        for prefix in ("-n=", "--numprocesses="):
+            if arg.startswith(prefix):
+                return arg.split("=", 1)[1]
+    return None
+
+
+def ensure_loadgroup_distribution(args: List[str]) -> List[str]:
+    """
+    Add ``--dist loadgroup`` when running ``consume direct`` in parallel.
+
+    Batch-capable consumers (e.g. Besu) tag each fixture's items with an
+    ``xdist_group`` marker so a whole group is consumed in one client process;
+    that pinning only happens under ``--dist loadgroup``. xdist must see the
+    flag on every worker's argv — setting ``config.option.dist`` on the
+    controller alone does not propagate to the workers — so it is injected
+    here. No-op when collecting only, running serially (``-n 0``), or when the
+    user already chose a ``--dist`` mode.
+    """
+    if collects_no_tests(args):
+        return args
+    if any(arg == "--dist" or arg.startswith("--dist=") for arg in args):
+        return args
+    if parallelism_value(args) in (None, "0"):
+        return args
+    return args + ["--dist", "loadgroup"]
+
+
 def collects_no_tests(args: List[str]) -> bool:
     """Return True for runs that never execute tests (so workers are moot)."""
     return any(
@@ -130,6 +162,7 @@ class ConsumeDirectCommand(PytestCommand):
                 processed_args = self._with_parallelism(
                     processed_args, besu_only=besu_only
                 )
+        processed_args = ensure_loadgroup_distribution(processed_args)
         return [
             PytestExecution(
                 config_file=self.config_path,
