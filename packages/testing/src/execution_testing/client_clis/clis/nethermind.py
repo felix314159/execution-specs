@@ -196,7 +196,10 @@ class NethtestFixtureConsumer(
         command = [str(self.binary), "--stdin"]
         if block_test:
             command.append("--blockTest")
-        stdin_input = "".join(f"{path}\n" for path in files)
+        # Absolute paths so they resolve regardless of working directory — in
+        # particular inside the Docker bridge's container, which mounts the
+        # fixtures directory at its resolved host path.
+        stdin_input = "".join(f"{Path(path).resolve()}\n" for path in files)
         # Note: a non-zero exit is not raised here. `nethtest` processes the
         # piped files sequentially and can throw an unhandled exception on a
         # single bad fixture (e.g. a blockchain post-state mismatch), aborting

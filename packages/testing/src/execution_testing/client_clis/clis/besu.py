@@ -579,7 +579,10 @@ class BesuFixtureConsumer(
         limit for very large batches.
         """
         command = [str(self.binary), subcommand]
-        stdin_input = "".join(f"{path}\n" for path in files)
+        # Absolute paths so they resolve regardless of working directory — in
+        # particular inside the Docker bridge's container, which mounts the
+        # fixtures directory at its resolved host path.
+        stdin_input = "".join(f"{Path(path).resolve()}\n" for path in files)
         result = self._run_command(command, stdin_input=stdin_input)
         if result.returncode != 0:
             raise Exception(
